@@ -20,11 +20,11 @@ endif
 .PHONY: $(CMD)
 $(CMD):
 	@if [ -z "$(ARGS)" ]; then
-		echo "[Error] No arguments provided for '$(CMD)'"
+		echo "[error] no arguments provided for '$(CMD)'"
 		exit 1
 	fi
 	if [ ! -f "$(TARGET_DIR)/Makefile" ]; then
-		echo "[Error] No Makefile found in directory '$(TARGET_DIR)/'"
+		echo "[error] no Makefile found in directory '$(TARGET_DIR)/'"
 		exit 1
 	fi
 	$(MAKE) -s -C $(TARGET_DIR) $(ARGS)
