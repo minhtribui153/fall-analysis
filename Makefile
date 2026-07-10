@@ -1,13 +1,30 @@
-.PHONY: deploy
+SHELL := /bin/bash
+.ONESHELL:
 
-ifeq ($(firstword $(MAKECMDGOALS)),deploy)
-    SUB_CMD := $(word 2,$(MAKECMDGOALS))
-    $(eval $(SUB_CMD):;@:)
+%:
+	@:
+
+CMD  := $(firstword $(MAKECMDGOALS))
+ARGS := $(wordlist 2, $(words $(MAKECMDGOALS)), $(MAKECMDGOALS))
+
+# Handle commands
+# If need to create a command alias then add here.
+ifeq ($(CMD),deploy)
+    TARGET_DIR := deployment
+# else ifeq ($(CMD),test)
+#     TARGET_DIR := testing
+else
+    TARGET_DIR := $(CMD)
 endif
 
-deploy:
-	@if [ -z "$(SUB_CMD)" ]; then \
-		echo "[Error] Missing sub-command. Usage: make deploy <component>"; \
-		exit 1; \
-	fi || exit 0
-	@$(MAKE) -s -C deployment $(SUB_CMD)
+.PHONY: $(CMD)
+$(CMD):
+	@if [ -z "$(ARGS)" ]; then
+		echo "[Error] No arguments provided for '$(CMD)'"
+		exit 1
+	fi
+	if [ ! -f "$(TARGET_DIR)/Makefile" ]; then
+		echo "[Error] No Makefile found in directory '$(TARGET_DIR)/'"
+		exit 1
+	fi
+	$(MAKE) -s -C $(TARGET_DIR) $(ARGS)

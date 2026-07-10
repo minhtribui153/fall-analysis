@@ -1,10 +1,33 @@
-.PHONY: %
+SHELL := /bin/bash
+.ONESHELL:
 
 %:
-	@if [ -f "./deploy-$@.sh" ]; then \
-		echo "Executing deployment/deploy-$@.sh..."; \
-		bash ./deploy-$@.sh; \
-	else \
-		echo "[Error] No script found for target '$@'"; \
-		exit 1; \
+	@:
+
+ACTION    := $(firstword $(MAKECMDGOALS))
+SERVICES  := $(wordlist 2, $(words $(MAKECMDGOALS)), $(MAKECMDGOALS))
+
+.PHONY: $(ACTION)
+
+$(ACTION):
+	@if [ -z "$(SERVICES)" ]; then
+		echo "[error] missing service name(s) for action '$(ACTION)'"
+		exit 1
 	fi
+	for service in $(SERVICES); do
+		FILE="./compose.$${service}.yaml"
+		if [ ! -f "$${FILE}" ]; then
+			echo "[error] file not found: deployment/compose.$${service}.yaml"
+			exit 1
+		fi
+		if [ "$(ACTION)" = "up" ]; then
+			echo "[ info] deploying $$service via $$FILE..."
+			docker compose -f $$FILE up -d
+		elif [ "$(ACTION)" = "down" ]; then
+			echo "[ info] shutting down $$service..."
+			docker compose -f $$FILE down
+		else
+			echo "[error] unknown action '$(ACTION)' inside deployment module"
+			exit 1
+		fi
+	done
