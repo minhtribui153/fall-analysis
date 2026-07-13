@@ -18,7 +18,7 @@ services:
             KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
             KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
         volumes:
-            - kafka_data:/var/lib/kafka/data
+            - ${DIR_DATA}/instances/kafka:/var/lib/kafka/data
 
     kafka-ui:
         image: provectuslabs/kafka-ui:latest
@@ -31,6 +31,3 @@ services:
             KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: 'kafka:9092'
         depends_on:
             - kafka
-
-volumes:
-    kafka_data:
