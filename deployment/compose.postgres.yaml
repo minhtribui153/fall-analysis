@@ -1,0 +1,95 @@
+services:
+    postgres:
+        image: postgres:18.4-alpine
+        container_name: sg-nyp-a1-eg2a17-postgres
+        restart: always
+
+        env_file:
+            - .env
+
+        environment:
+            POSTGRES_DB: ${POSTGRES_DB}
+            POSTGRES_USER: ${POSTGRES_USER}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+        volumes:
+            - ${DIR_DATA}/instances/postgres:/var/lib/postgresql
+            - ${DIR_DATA}/instances/postgres/initdb.d:/docker-entrypoint-initdb.d
+
+        ports:
+            - "5432:5432"
+
+        networks:
+            - postgres_network
+
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+
+    pgadmin-init:
+        image: alpine:latest
+        container_name: sg-nyp-a1-eg2a17-pgadmin-init
+        user: "root"
+        env_file:
+            - .env
+        volumes:
+            - ${DIR_DATA}/instances/pgadmin:/mnt/pgadmin
+        command: >
+            sh -c "
+            mkdir -p /mnt/pgadmin &&
+            echo '{
+              \"Servers\": {
+                \"1\": {
+                  \"Name\": \"Local Postgres Instance\",
+                  \"Group\": \"Servers\",
+                  \"Host\": \"sg-nyp-a1-eg2a17-postgres\",
+                  \"Port\": 5432,
+                  \"MaintenanceDB\": \"'\"$$POSTGRES_DB\"'\",
+                  \"Username\": \"'\"$$POSTGRES_USER\"'\",
+                  \"SSLMode\": \"prefer\",
+                  \"SSLCompression\": 0,
+                  \"Timeout\": 10,
+                  \"UseSSHTunnel\": 0
+                }
+              }
+            }' > /mnt/pgadmin/servers.json &&
+            chown -R 5050:5050 /mnt/pgadmin
+            "
+        networks:
+            - postgres_network
+
+    pgadmin:
+        image: dpage/pgadmin4:latest
+        container_name: sg-nyp-a1-eg2a17-pgadmin
+        restart: always
+
+        env_file:
+            - .env
+
+        environment:
+            PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+            PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+            PGADMIN_LISTEN_ADDRESS: 0.0.0.0
+            PGADMIN_SERVER_JSON_FILE: /var/lib/pgadmin/servers.json
+
+        volumes:
+            - ${DIR_DATA}/instances/pgadmin:/var/lib/pgadmin
+
+        depends_on:
+            postgres:
+                condition: service_healthy
+            pgadmin-init:
+                condition: service_completed_successfully
+
+        ports:
+            - "5050:80"
+
+        networks:
+            - postgres_network
+
+networks:
+    postgres_network:
+        driver: bridge
