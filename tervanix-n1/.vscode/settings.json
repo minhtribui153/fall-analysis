@@ -1,10 +1,5 @@
 {
-    "C_Cpp.intelliSenseEngine": "disabled",
-
-    "clangd.arguments": [
-        "--compile-commands-dir=${workspaceFolder}",
-        "--query-driver=**/xtensa-esp32-elf-gcc*,**/xtensa-esp32-elf-g++*",
-        "--background-index",
-        "--header-insertion=never"
-    ]
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "platformio.platformio-ide"
 }
