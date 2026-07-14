@@ -1,0 +1,16 @@
+CompileFlags:
+  CompilationDatabase: .
+
+  Remove:
+    - -mlongcalls
+    - -mtext-section-literals
+    - -fno-shrink-wrap
+    - -fstrict-volatile-bitfields
+    - -fno-tree-switch-conversion
+    - -fzero-init-padding-bits=*
+    - -fno-malloc-dce
+
+Diagnostics:
+  Suppress:
+    - drv_unknown_argument
+    - pp_file_not_found
