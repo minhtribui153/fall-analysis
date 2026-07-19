@@ -1,48 +1,41 @@
 """
 detection.py
-Fall / near-miss classifier over a rolling IMU buffer.
-Hardware-agnostic: feed it (ax, ay, az, ts) from BLE, Kafka, CSV replay, or a simulator.
 
-1. Trigger condition is now OR, not AND.
-   Original: `smv >= STUMBLE_THRESH and gyro_mag >= TRIGGER_GYRO` on the SAME sample.
-   In a real fall the rotational peak (mid-fall tumble) and the impact peak (ground
-   contact) rarely land on the same sample, so an AND trigger risks missing real
-   events. Widening the trigger to OR doesn't hurt precision: classification still
-   independently re-confirms BOTH an impact spike and a rotation spike before a
-   FALL is ever returned.
+Turns raw IMU readings (accelerometer + gyro) from the waist-mounted
+NESSO N1 into two things:
 
-2. FALL vs NEAR_MISS no longer depends on post-impact stillness.
-   Original: a FALL required `is_still` afterwards. A conscious worker who is
-   down and struggling/in pain will keep moving -- under the old logic that
-   worker got demoted to NEAR_MISS, which is backwards for a safety-alert system.
-   Now: FALL is decided by whether the worker ends up DOWN (large orientation
-   change + is_down), and NEAR_MISS is a rotation/orientation disturbance where
-   the worker does NOT end up down (i.e. they stumbled and recovered balance).
-   Stillness is still computed, but reported separately as `responsiveness`
-   ("still" / "active") for alert triage (e.g. "still" may mean unconscious and
-   therefore higher urgency), instead of gating the event type.
+  1. FallDetector -- watches for falls and near-misses. Event-triggered:
+     stays quiet during normal activity, fires once when something
+     worth flagging happens.
 
-3. Timing is anchored to the event's own timestamps, with a sample-count fallback.
-   Original: `elapsed_samples = self._counter - self.event_start_count`, and the
-   impact-timing check inside `_classify_event` divided raw buffer index by the
-   nominal `sample_rate`. Both assume perfectly uniform sampling, which wireless
-   links (BLE/Wi-Fi to the Nesso N1) don't guarantee. Timing is now computed from
-   actual sample timestamps (`ts`) relative to `event_start_ts`, and only falls
-   back to `sample_count * nominal_dt` when timestamps are missing or non-monotonic.
-   This also removes the old implicit (undocumented) coupling between buffer size
-   and RECOVERY_WINDOW that the impact-time window used to rely on.
+  2. ActivityClassifier -- a lighter, always-on guess at what the
+     person's currently doing (standing still, walking, running,
+     jumping). Runs continuously in the background, mostly useful for
+     dashboard context and for tagging what someone was doing right
+     before a fall got flagged.
 
-4. Basic bad-sample handling.
-   A single corrupted BLE packet (None / NaN / non-finite values) is no longer
-   appended to the buffer as-is, which could previously produce a phantom trigger
-   or corrupt the tilt/impact calculations. Bad samples are now dropped; a run of
-   consecutive bad samples long enough to represent a real link outage resets any
-   in-progress event instead of classifying across a dead zone.
+Everything here is threshold-based, no ML. That's a deliberate choice
+given the timeline -- it's easy to reason about, easy to recalibrate
+against new recordings, and doesn't need a training pipeline. The
+tradeoff is these numbers are only as good as the data we've tested
+them against, which so far is a handful of staged recordings. Treat
+every threshold below as a starting point, not gospel -- keep feeding
+it more real captures and adjust as patterns show up.
 
-None of this replaces real calibration. Thresholds below are still placeholders --
-calibrate them against captured data from the actual mounted device and realistic
-site motions (kneeling, ladder climbing, bending, sitting, riding in a vehicle)
-before trusting the false positive / false negative rate.
+Quick history on where the fall-detection thresholds came from, since
+it's not obvious just from reading the numbers:
+  - Started with a simple "is the accel spike big enough" check.
+  - That missed real falls with a fast impact (one of our test falls
+    had only a 40ms rise time and got filtered out by an overly strict
+    timing window -- that check got removed).
+  - Switched from a single end-of-window tilt reading to "was the
+    person down for a sustained stretch", because staged test falls
+    have the person hop back up quickly to reset for the next take,
+    and a single snapshot can catch them after they've already stood
+    back up.
+  - Added a cooldown after each detected event so the same fall
+    doesn't fire five separate alerts as the person gets up and moves
+    around afterward.
 """
 
 import math
@@ -50,48 +43,64 @@ import statistics
 from collections import deque
 from datetime import datetime
 
-# ── Tunable thresholds — calibrate against real captured data ──────────────
-FREEFALL_THRESH   = 0.5    # g, below this = possible free-fall
-IMPACT_THRESH     = 2.5    # g, above this = impact spike
-STUMBLE_THRESH    = 1.5    # g, elevated but not a full impact
+# ── Fall detection thresholds ───────────────────────────────────────────
+# Calibrated against real staged recordings (walking, tripping, slipping,
+# and a couple of actual falls). Small sample size -- keep an eye on
+# these as more data comes in.
 
-STILL_VARIANCE    = 0.15   # g^2, low variance = not moving
-RECOVERY_WINDOW   = 2.8    # seconds -- widened from 2.0. Real captured data
-                            # showed a genuine recovered slip still mid-recovery
-                            # (tilt 59-86 deg) at the 2.0s mark, only settling
-                            # back to baseline near 2.2s. Classifying too early
-                            # catches a mid-recovery snapshot as if it were the
-                            # final resting orientation.
-FFH_FREEFALL_MIN  = 0.04    # seconds — above this, classify as FFH not STF
+FREEFALL_THRESH   = 0.5    # g -- below this, we're probably airborne
+IMPACT_THRESH     = 2.5    # g -- a spike this big means something hit the ground
+STUMBLE_THRESH    = 1.5    # g -- not necessarily a fall, but enough to start paying attention
 
-TRIGGER_GYRO      = 120    # deg/s
-ROTATION_SPIKE    = 180    # deg/s
+STILL_VARIANCE    = 0.15   # g^2 -- how "flat" the signal needs to be to call it stillness
+RECOVERY_WINDOW   = 2.8    # seconds we wait after a trigger before deciding what happened.
+                             # (bumped up from 2.0s -- a real recovered slip was still
+                             # mid-recovery at the 2s mark and got misread)
+FFH_FREEFALL_MIN  = 0.2    # seconds of freefall before we'd call it a height-fall
 
-MAX_DROPPED_IN_A_ROW = 10  # consecutive bad samples treated as a real link outage
-POST_EVENT_COOLDOWN = 3.0  # seconds -- suppresses new triggers right after a
-                            # classified event. Real data showed a single fall
-                            # (person impacting, then moving/getting up) firing
-                            # 5 separate duplicate FALL events within 10s without
-                            # this -- settling/getting-up motion re-crosses the
-                            # trigger threshold and would otherwise be treated
-                            # as a brand-new incident.
+TRIGGER_GYRO      = 120    # deg/s -- rotation alone can also kick off an event
+ROTATION_SPIKE    = 180    # deg/s -- a proper tumble, not just a wobble
+
+IS_DOWN_ANGLE        = 55   # degrees from "upright" -- past this, we're calling it down
+IS_DOWN_SUSTAIN_MIN  = 0.15 # seconds -- has to stay down for a beat, not just flicker through
+ORIENTATION_SPIKE_THRESH = 20  # degrees -- how far they have to lean/rotate to count as "something happened"
+
+MAX_DROPPED_IN_A_ROW = 10   # bad packets in a row before we assume the link dropped
+POST_EVENT_COOLDOWN  = 3.0  # seconds of quiet after an event before we'll trigger again
+
+# A heads-up on FFH_FREEFALL_MIN: in testing, this hasn't actually been able to
+# tell a real height-fall apart from a same-level trip/slip -- both showed
+# similarly short freefall times, probably because staged test falls don't
+# involve dropping from an actual height. A real height fall should produce a
+# noticeably longer freefall phase, but we haven't captured one of those yet
+# to confirm the number. Worth flagging as a known limitation rather than
+# pretending this threshold is solid.
 
 
 def _smv(ax, ay, az):
+    """Signal magnitude vector -- basically 'how much total acceleration',
+    ignoring which direction it's pointing."""
     return math.sqrt(ax ** 2 + ay ** 2 + az ** 2)
 
 
 def _gyro_magnitude(gx, gy, gz):
-    """Angular velocity magnitude (deg/s). Used only as a secondary
-    confidence check -- NOT the sole trigger. A tumbling fall
-    typically produces a sharp rotational spike; a controlled motion
-    (e.g. sitting down, placing the device on a table) usually doesn't,
-    even if it briefly crosses the accelerometer impact threshold."""
+    """Same idea but for rotation speed (deg/s). Used as supporting
+    evidence, not the main trigger -- a controlled motion like sitting
+    down can still spike gyro briefly without being a fall."""
     return math.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
 
 
 def _tilt_angle(ax, ay, az):
-    """Angle from vertical (upright), in degrees."""
+    """Roughly: how far off 'upright' is the device right now, in degrees.
+
+    Heads up: this assumes gravity mostly sits on the X axis when the
+    device is worn upright -- which is true for how the NESSO N1 sits
+    on a waist clip, confirmed against real walking data (ax averaged
+    around -0.91g at rest). If someone mounts the device differently
+    (different clip angle, different body position), this axis
+    assumption breaks and tilt readings will be meaningless. Worth
+    double-checking if a second sensor gets added with a different mount.
+    """
     mag = _smv(ax, ay, az)
     if mag == 0:
         return 0
@@ -99,10 +108,10 @@ def _tilt_angle(ax, ay, az):
 
 
 def _elapsed_seconds(ts_start, ts_end, fallback_dt=None):
-    """Elapsed seconds between two timestamps. Handles both numeric
-    (float/int, seconds) and datetime timestamps. Falls back to
-    `fallback_dt` if timestamps are missing, mismatched in type, or
-    non-monotonic (e.g. a clock jump / out-of-order packet)."""
+    """Seconds between two timestamps, whether they're floats or
+    datetimes. Falls back to `fallback_dt` if something's off (missing
+    timestamp, clock jumped backwards, whatever) -- BLE over a wireless
+    link isn't always perfectly behaved."""
     if ts_start is None or ts_end is None:
         return fallback_dt
     try:
@@ -117,18 +126,111 @@ def _elapsed_seconds(ts_start, ts_end, fallback_dt=None):
     return delta
 
 
-class FallDetector:
-    """Event-triggered fall/near-miss classifier over a rolling IMU buffer.
+class ActivityClassifier:
+    """Keeps a rolling window of accel data and takes a guess at what
+    the person's doing right now: stationary, walking, running, or
+    jumping.
 
-    Uses a monotonic sample counter as a fallback time base only -- real
-    elapsed time (from `ts`) is preferred whenever timestamps are usable,
-    since wireless sampling is rarely perfectly uniform.
+    This is intentionally simple -- no FFT, no ML, just basic stats on
+    the accel magnitude over a short window. It won't win any research
+    awards, but it's enough to tell these four states apart in theory.
+
+    Heads up, unlike FallDetector's thresholds, NONE of the numbers in
+    here have been checked against real recordings yet -- there just
+    isn't a labeled "walking for 15 seconds straight" / "running" /
+    "jumping" dataset to test against so far (the calibration CSVs
+    used for the fall detector are short 5s bursts, often shorter than
+    this classifier's own window, which isn't long enough to say much).
+    Treat this as a first draft: structurally it works, but don't trust
+    its actual output until it's been run against some proper longer
+    recordings of each activity.
+
+    Also worth knowing: right before a fall, the brief stumble/
+    destabilization phase can look a lot like the jump signature (a
+    dip then a spike) -- so `activity_before_event` on a FALL result
+    may reflect the fall's own onset bleeding into this classifier's
+    window, not necessarily what the person was genuinely doing a
+    second earlier. Shortening the window helps a little but doesn't
+    fully solve this -- worth a closer look once there's real jumping
+    data to compare against.
+
+    Doesn't influence FallDetector's decisions right now, just runs
+    alongside it and reports separately.
     """
 
-    def __init__(self, sample_rate=100):
+    def __init__(self, sample_rate=100, window_seconds=1.0, update_every=20):
+        self.sample_rate = sample_rate
+        self.window_size = int(sample_rate * window_seconds)
+        self.buffer = deque(maxlen=self.window_size)
+        self.update_every = update_every  # recompute every N samples, not every single one --
+                                            # activity doesn't change fast enough to justify
+                                            # redoing this math 100x/sec
+        self._since_update = 0
+        self.state = "unknown"  # not enough data yet to say anything
+
+    def add_sample(self, ax, ay, az):
+        self.buffer.append(_smv(ax, ay, az))
+        self._since_update += 1
+
+        if len(self.buffer) < self.window_size:
+            return self.state  # still filling the window
+
+        if self._since_update >= self.update_every:
+            self.state = self._classify()
+            self._since_update = 0
+
+        return self.state
+
+    def _classify(self):
+        values = list(self.buffer)
+        mean_smv = statistics.mean(values)
+        std_smv = statistics.pstdev(values)
+        min_smv = min(values)
+        max_smv = max(values)
+
+        # Jumping has a pretty distinctive shape: a dip toward
+        # near-weightlessness (you're briefly airborne) followed by a
+        # sharp landing spike. Walking and running never really let go
+        # of the ground like that, so this catches jumps pretty cleanly.
+        if min_smv < 0.6 and max_smv > 1.8:
+            return "jumping"
+
+        # Barely moving at all -- standing around, working with hands,
+        # sitting, that sort of thing.
+        if std_smv < 0.08:
+            return "stationary"
+
+        # First attempt at walking-vs-running used a step counter
+        # (counting threshold crossings to estimate cadence), but that
+        # turned out to be way too noise-sensitive on real data -- it
+        # was counting 5-8 "steps" per second during normal walking,
+        # which is obviously wrong and was misclassifying walking as
+        # running. Simplified to intensity instead: how much the signal
+        # swings around (std_smv) and how hard the peaks hit (max_smv).
+        # Cruder than proper cadence detection, but at least it doesn't
+        # lie. The walking cutoff below is grounded in real data (a
+        # genuine walking segment measured std_smv ~0.11-0.12); the
+        # running cutoff is still a guess since there's no labeled
+        # running data to check it against yet.
+        if std_smv > 0.35 or max_smv > 1.8:
+            return "running"
+        return "walking"
+
+
+class FallDetector:
+    """Watches a stream of IMU samples and flags falls / near-misses.
+
+    Stays quiet during normal activity. Wakes up when something crosses
+    a trigger threshold, watches what happens over the next couple of
+    seconds, then decides: was that a real fall, a stumble that got
+    caught, or nothing worth mentioning.
+    """
+
+    def __init__(self, sample_rate=100, track_activity=True):
         self.sample_rate = sample_rate
         self.nominal_dt = 1.0 / sample_rate
-        self.buffer = deque(maxlen=int(sample_rate * 4))  # ~4s of history (physical capacity) -- widened to preserve pre-event context now RECOVERY_WINDOW is 2.8s
+        self.buffer = deque(maxlen=int(sample_rate * 4))  # ~4s of context, enough to cover
+                                                              # lead-in + the RECOVERY_WINDOW tail
         self.in_event = False
         self.event_start_count = None
         self.event_start_ts = None
@@ -137,19 +239,23 @@ class FallDetector:
         self._cooldown_until_ts = None
         self._cooldown_until_count = None
 
+        self.activity = ActivityClassifier(sample_rate=sample_rate) if track_activity else None
+        self._activity_at_trigger = None
+
     def add_sample(self, ax, ay, az, ts, gx=0.0, gy=0.0, gz=0.0):
         """
-        ts: seconds (float) or datetime — must be consistent within a session.
-        gx, gy, gz: optional gyroscope values, used only as a secondary
-        confidence signal on top of the primary accelerometer-based trigger.
-        Returns a classification dict when an event completes, else None.
+        ts: seconds (float) or datetime -- just needs to be consistent
+        within a session.
+        gx, gy, gz: gyro readings, optional (default 0.0 if you don't have them).
+        Returns a result dict once an event finishes, otherwise None.
         """
         clean = self._sanitize(ax, ay, az, gx, gy, gz)
         if clean is None:
             self._dropped_in_a_row += 1
             if self._dropped_in_a_row >= MAX_DROPPED_IN_A_ROW:
-                # Long enough gap that it's a real link outage, not sensor
-                # noise -- don't let a stale in-progress event span across it.
+                # Enough bad packets in a row that this looks like a real
+                # link outage, not just noise -- don't let a half-finished
+                # event span across a dead zone in the data.
                 self.in_event = False
                 self.event_start_count = None
                 self.event_start_ts = None
@@ -158,6 +264,9 @@ class FallDetector:
 
         self._dropped_in_a_row = 0
         ax, ay, az, gx, gy, gz = clean
+
+        if self.activity is not None:
+            self.activity.add_sample(ax, ay, az)
 
         smv = _smv(ax, ay, az)
         tilt = _tilt_angle(ax, ay, az)
@@ -171,15 +280,16 @@ class FallDetector:
             since_cooldown_started = _elapsed_seconds(self._cooldown_until_ts, ts, fallback_dt=fallback)
             in_cooldown = since_cooldown_started < POST_EVENT_COOLDOWN
 
-        # Trigger on EITHER signal (see revision note 1 above). Classification
-        # still independently requires both an impact spike and a rotation
-        # spike before labeling anything a FALL. Suppressed during cooldown
-        # so getting-up/settling motion right after a fall doesn't spawn a
-        # duplicate event for the same physical incident.
+        # Either signal can kick things off -- a real fall's rotation
+        # peak and impact peak don't always land on the exact same
+        # sample, so requiring both at once risks missing real events.
+        # Classification below still independently checks for both
+        # before calling anything a FALL, so this doesn't hurt precision.
         if not self.in_event and not in_cooldown and (smv >= STUMBLE_THRESH or gyro_mag >= TRIGGER_GYRO):
             self.in_event = True
             self.event_start_count = self._counter
             self.event_start_ts = ts
+            self._activity_at_trigger = self.activity.state if self.activity else None
 
         result = None
         if self.in_event:
@@ -196,10 +306,18 @@ class FallDetector:
         self._counter += 1
         return result
 
+    @property
+    def current_activity(self):
+        """What the person seems to be doing right now (stationary /
+        walking / running / jumping / unknown). Useful for a live
+        dashboard feed -- doesn't require an event to be in progress."""
+        return self.activity.state if self.activity else None
+
     @staticmethod
     def _sanitize(ax, ay, az, gx, gy, gz):
-        """Reject packets with missing or non-finite values instead of
-        letting them corrupt the buffer / trigger a phantom event."""
+        """Drop anything obviously broken (missing values, NaN, inf)
+        instead of letting it corrupt the buffer or spawn a phantom
+        trigger."""
         values = (ax, ay, az, gx, gy, gz)
         if any(v is None for v in values):
             return None
@@ -220,79 +338,46 @@ class FallDetector:
         return _elapsed_seconds(sample_a["ts"], sample_b["ts"], fallback_dt=fallback)
 
     def _classify_event(self):
-
         event = list(self.buffer)
-
         if len(event) < self.sample_rate:
-            return None
+            return None  # not enough data yet to say anything meaningful
 
         smv_series = [s["smv"] for s in event]
         gyro_series = [s["gyro_mag"] for s in event]
         tilt_series = [s["tilt"] for s in event]
 
-        # -----------------------------
-        # Peak impact
-        # -----------------------------
+        # How hard did it hit
         max_smv = max(smv_series)
         impact_index = smv_series.index(max_smv)
         impact_sample = event[impact_index]
-
         time_after_impact = self._time_between(impact_sample, event[-1])
 
-        # NOTE: an earlier version also required
-        # `0.1 <= impact_time_since_event_start <= 1.5`. Removed after real
-        # captured data showed it rejects genuine fast falls -- one real
-        # fall had an impact rise time of just 0.040s (below the 0.1s
-        # floor) and was silently dropped, while a near-identical real
-        # fall landed at 0.200s and passed purely by chance. Fall speed
-        # isn't a meaningful signal for real-vs-not; magnitude (max_smv,
-        # max_rotation) and orientation (is_down, tilt_change) already
-        # independently gate FALL below, so this window added fragility
-        # without added specificity.
+        # We used to also require the impact to land within a specific
+        # timing window after the trigger (0.1-1.5s). Dropped that after
+        # a real fast fall (40ms rise time) got filtered out by it, while
+        # a near-identical fall at 0.2s happened to pass -- fall speed
+        # isn't actually a meaningful signal here, so the window was just
+        # adding fragility without telling us anything useful.
         valid_impact = max_smv >= IMPACT_THRESH and time_after_impact >= 1.0
 
-        # -----------------------------
-        # Consecutive freefall duration
-        # -----------------------------
+        # How long were they actually in the air (freefall)
         longest_freefall = 0
         current = 0
-
         for smv in smv_series:
             if smv < FREEFALL_THRESH:
                 current += 1
                 longest_freefall = max(longest_freefall, current)
             else:
                 current = 0
-
         freefall_duration = longest_freefall / self.sample_rate
         had_freefall = freefall_duration >= FFH_FREEFALL_MIN
 
-        # -----------------------------
-        # Orientation
-        #
-        # is_down uses SUSTAINED duration above IS_DOWN_ANGLE, not a
-        # single end-of-window snapshot. Real staged-fall data showed the
-        # person recovering to upright WITHIN the classification window
-        # (test actor getting up to reset for the next take) -- a single
-        # tilt reading at window's end can catch them AFTER they've
-        # already stood back up, misreading a real fall as recovered.
-        #
-        # Calibration note: an initial pass flagged an apparent overlap
-        # between a "slip" example (0.45s sustained) and a real fall
-        # example (0.18s sustained) as ambiguous. Confirmed with ground
-        # truth: the "slip" example was ALSO a genuine fall (fell
-        # backward, landed on back, stayed down for the labeled
-        # interval) -- not a recovered near-miss as the label name
-        # suggested. Both durations correctly belong to the same FALL
-        # category; the spread is normal variation, not threshold
-        # confusion. Still worth adding more labeled examples per
-        # category over time to firm up IS_DOWN_SUSTAIN_MIN with a
-        # larger sample, but there is no known conflicting example
-        # as of this calibration pass.
-        # -----------------------------
-        IS_DOWN_ANGLE = 55        # deg from reference
-        IS_DOWN_SUSTAIN_MIN = 0.15  # seconds
-
+        # Orientation: did they end up down, and did they stay there
+        # for a bit (not just a momentary tilt reading). Sustained
+        # duration matters more than a single snapshot -- staged test
+        # falls have the person hop back up quickly to reset for the
+        # next take, so checking orientation at one exact moment can
+        # catch them mid-recovery and misread a real fall.
         start_tilt = statistics.mean(tilt_series[:20])
         longest_down_run = 0
         current_run = 0
@@ -303,110 +388,63 @@ class FallDetector:
             else:
                 current_run = 0
         sustained_down_duration = longest_down_run / self.sample_rate
-
-        peak_tilt = max(tilt_series)
-        tilt_change = abs(peak_tilt - start_tilt)  # peak deviation, not start-vs-end delta
-                                                     # (see earlier finding: a real near-miss
-                                                     # peaked at 119.8 deg but had only a 9.2
-                                                     # deg start/end delta -- start-vs-end
-                                                     # comparison misses transient swings that
-                                                     # recover before the window closes)
-
         is_down = sustained_down_duration >= IS_DOWN_SUSTAIN_MIN
-        large_orientation_change = tilt_change > 20
 
-        # -----------------------------
-        # Stillness AFTER impact -- kept as a signal, but (see revision note 2)
-        # no longer gates FALL vs NEAR_MISS. Reported as `responsiveness` for
-        # downstream alert triage instead.
-        # -----------------------------
-        post_impact = event[impact_index:]
+        # Peak deviation from upright, not start-vs-end -- a real
+        # near-miss can swing wide mid-event and still recover by the
+        # time the window closes, and start/end comparison misses that
+        # completely (one recorded near-miss swung to ~120 degrees but
+        # was back within 10 degrees of where it started by the end).
+        peak_tilt = max(tilt_series)
+        tilt_change = abs(peak_tilt - start_tilt)
+        had_orientation_spike = tilt_change > ORIENTATION_SPIKE_THRESH
 
-        if len(post_impact) >= self.sample_rate:
-
-            tail = post_impact[-self.sample_rate:]
-
-            tail_smv = [s["smv"] for s in tail]
-
-            variance = statistics.pvariance(tail_smv)
-
-            mean_smv = statistics.mean(tail_smv)
-
-        else:
-
-            variance = 999
-            mean_smv = 999
-
-        is_still = (
-            variance < STILL_VARIANCE
-            and abs(mean_smv - 1.0) < 0.25
-        )
-        responsiveness = "still" if is_still else "active"
-
-        # -----------------------------
-        # Rotation
-        # -----------------------------
+        # Rotation -- supporting evidence for "something dramatic happened"
         max_rotation = max(gyro_series)
-
         had_rotation_spike = max_rotation > ROTATION_SPIKE
 
-        # =====================================================
-        # Classification
-        #
-        # FALL: valid impact + rotation spike + large orientation change,
-        # and the worker ends up down. `responsiveness` ("still"/"active")
-        # travels with the event for alert triage but does not decide the
-        # label -- a struggling, conscious worker is still a FALL.
-        #
-        # NEAR_MISS: rotation spike + large orientation change, but the
-        # worker does NOT end up down -- i.e. they stumbled and recovered
-        # their balance before settling.
-        # =====================================================
+        # Are they still moving afterward, or lying still. Doesn't
+        # decide FALL vs NEAR_MISS on its own -- reported separately so
+        # whoever's triaging alerts can factor it in (someone down and
+        # not moving is a different urgency than someone down and
+        # clearly still conscious/struggling).
+        post_impact = event[impact_index:]
+        if len(post_impact) >= self.sample_rate:
+            tail = post_impact[-self.sample_rate:]
+            tail_smv = [s["smv"] for s in tail]
+            variance = statistics.pvariance(tail_smv)
+            mean_smv = statistics.mean(tail_smv)
+        else:
+            variance, mean_smv = 999, 999
+        is_still = variance < STILL_VARIANCE and abs(mean_smv - 1.0) < 0.25
+        responsiveness = "still" if is_still else "active"
 
-        if (
-            valid_impact
-            and had_rotation_spike
-            and large_orientation_change
-            and is_down
-        ):
-
-            fall_type = "FFH" if had_freefall else "STF"
-
-            return {
-                "event_type": "FALL",
-                "fall_type": fall_type,
-                "responsiveness": responsiveness,
-                "max_smv": max_smv,
-                "max_rotation": max_rotation,
-                "freefall_duration": freefall_duration,
-                "tilt_change": tilt_change,
-                "ts": event[-1]["ts"],
-            }
-
-        elif (
-            had_rotation_spike
-            and large_orientation_change
-            and not is_down
-        ):
-
-            return {
-                "event_type": "NEAR_MISS",
-                "fall_type": None,
-                "responsiveness": responsiveness,
-                "max_smv": max_smv,
-                "max_rotation": max_rotation,
-                "freefall_duration": freefall_duration,
-                "tilt_change": tilt_change,
-                "ts": event[-1]["ts"],
-            }
-
-        return {
-            "event_type": "NORMAL",
-            "fall_type": None,
-            "responsiveness": responsiveness,
+        base = {
             "max_smv": max_smv,
             "max_rotation": max_rotation,
             "freefall_duration": freefall_duration,
             "tilt_change": tilt_change,
+            "responsiveness": responsiveness,
+            "activity_before_event": self._activity_at_trigger,
             "ts": event[-1]["ts"],
         }
+
+        # FALL: real impact, a rotation spike, AND a genuine orientation
+        # disturbance, AND they ended up down for a real stretch of time.
+        # All four have to agree -- any one on its own isn't reliable
+        # enough (e.g. a hard knock without tumbling, or a lean without
+        # actually going down).
+        if valid_impact and had_rotation_spike and had_orientation_spike and is_down:
+            # See the FFH_FREEFALL_MIN note near the top of the file --
+            # this split hasn't actually been validated against a real
+            # height fall yet, so don't take the FFH/STF label here as
+            # gospel, just a best guess.
+            fall_type = "FFH" if had_freefall else "STF"
+            return {**base, "event_type": "FALL", "fall_type": fall_type}
+
+        # NEAR_MISS: rotation spike + a real orientation disturbance,
+        # but they didn't end up down -- stumbled, caught themselves.
+        if had_rotation_spike and had_orientation_spike and not is_down:
+            return {**base, "event_type": "NEAR_MISS", "fall_type": None}
+
+        return {**base, "event_type": "NORMAL", "fall_type": None}
