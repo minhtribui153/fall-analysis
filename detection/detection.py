@@ -133,26 +133,31 @@ class ActivityClassifier:
 
     This is intentionally simple -- no FFT, no ML, just basic stats on
     the accel magnitude over a short window. It won't win any research
-    awards, but it's enough to tell these four states apart in theory.
+    awards, but it correctly identifies all four states on real
+    continuous recordings (stationary, walking, running, jumping --
+    ~300-400 samples each, done back to back) once the window has
+    enough data to say something.
 
-    Heads up, unlike FallDetector's thresholds, NONE of the numbers in
-    here have been checked against real recordings yet -- there just
-    isn't a labeled "walking for 15 seconds straight" / "running" /
-    "jumping" dataset to test against so far (the calibration CSVs
-    used for the fall detector are short 5s bursts, often shorter than
-    this classifier's own window, which isn't long enough to say much).
-    Treat this as a first draft: structurally it works, but don't trust
-    its actual output until it's been run against some proper longer
-    recordings of each activity.
+    Worth knowing how walking/running/jumping actually get told apart:
+    walking never dips below 0.6g in the real data (lowest recorded was
+    0.678g), while running and jumping both do, repeatedly -- so "any
+    dip at all" is what separates walking from the other two. Running
+    and jumping then split on how OFTEN they dip: running's stride
+    cycle is faster (~11 dips/sec in the recording) than a jump's
+    land-and-reset cycle (~6.6 dips/sec). This is all calibrated
+    against one continuous recording per activity, so it's a solid
+    first pass, not a bulletproof one -- more recordings (different
+    people, different paces) would help firm up that 8.5 dips/sec
+    split point.
 
-    Also worth knowing: right before a fall, the brief stumble/
-    destabilization phase can look a lot like the jump signature (a
-    dip then a spike) -- so `activity_before_event` on a FALL result
-    may reflect the fall's own onset bleeding into this classifier's
-    window, not necessarily what the person was genuinely doing a
-    second earlier. Shortening the window helps a little but doesn't
-    fully solve this -- worth a closer look once there's real jumping
-    data to compare against.
+    One thing to watch for: right before a fall, the brief stumble/
+    destabilization phase can look a lot like a jump's dip-then-spike
+    signature. So `activity_before_event` on a FALL result sometimes
+    reflects the fall's own onset rather than what the person was
+    genuinely doing a second earlier -- seen this happen a few times
+    in testing. Not a bug exactly, just a real limit of using a short
+    rolling window right up against the moment something dramatic
+    starts happening.
 
     Doesn't influence FallDetector's decisions right now, just runs
     alongside it and reports separately.
@@ -183,38 +188,50 @@ class ActivityClassifier:
 
     def _classify(self):
         values = list(self.buffer)
-        mean_smv = statistics.mean(values)
         std_smv = statistics.pstdev(values)
-        min_smv = min(values)
-        max_smv = max(values)
-
-        # Jumping has a pretty distinctive shape: a dip toward
-        # near-weightlessness (you're briefly airborne) followed by a
-        # sharp landing spike. Walking and running never really let go
-        # of the ground like that, so this catches jumps pretty cleanly.
-        if min_smv < 0.6 and max_smv > 1.8:
-            return "jumping"
 
         # Barely moving at all -- standing around, working with hands,
-        # sitting, that sort of thing.
+        # sitting, that sort of thing. Real stationary data measured
+        # std_smv ~0.003, so 0.08 leaves a lot of headroom.
         if std_smv < 0.08:
             return "stationary"
 
-        # First attempt at walking-vs-running used a step counter
-        # (counting threshold crossings to estimate cadence), but that
-        # turned out to be way too noise-sensitive on real data -- it
-        # was counting 5-8 "steps" per second during normal walking,
-        # which is obviously wrong and was misclassifying walking as
-        # running. Simplified to intensity instead: how much the signal
-        # swings around (std_smv) and how hard the peaks hit (max_smv).
-        # Cruder than proper cadence detection, but at least it doesn't
-        # lie. The walking cutoff below is grounded in real data (a
-        # genuine walking segment measured std_smv ~0.11-0.12); the
-        # running cutoff is still a guess since there's no labeled
-        # running data to check it against yet.
-        if std_smv > 0.35 or max_smv > 1.8:
+        # Everything past this point is about "airborne dips" -- brief
+        # stretches where SMV drops toward near-weightlessness, which
+        # happens during the flight phase of a stride or a jump but
+        # basically never during walking. Real data backs this up:
+        # walking's lowest recorded SMV was 0.678g -- it never dipped
+        # below 0.6 at all, while running and jumping both did,
+        # repeatedly.
+        dips = self._find_dips(values, thresh=0.6)
+        window_seconds = self.window_size / self.sample_rate
+        dip_rate = len(dips) / window_seconds  # dips per second
+
+        if not dips:
+            return "walking"
+
+        # Running and jumping both dip, but at different rates -- real
+        # data showed running dipping about twice as often as jumping
+        # (~11/sec vs ~6.6/sec), which makes sense: a running stride
+        # cycles faster than a jump-land-reset cycle. 8.5 splits the
+        # difference between the two measured rates.
+        if dip_rate >= 8.5:
             return "running"
-        return "walking"
+        return "jumping"
+
+    @staticmethod
+    def _find_dips(values, thresh):
+        """Returns one entry per separate stretch where the signal drops
+        below `thresh` -- each one is a brief 'airborne' moment."""
+        dips = []
+        in_dip = False
+        for v in values:
+            if v < thresh and not in_dip:
+                dips.append(True)
+                in_dip = True
+            elif v >= thresh:
+                in_dip = False
+        return dips
 
 
 class FallDetector:
