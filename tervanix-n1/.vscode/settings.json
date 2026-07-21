@@ -1,5 +1,10 @@
 {
   "C_Cpp.intelliSenseEngine": "disabled",
   "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
-  "C_Cpp.default.configurationProvider": "platformio.platformio-ide"
+  "C_Cpp.default.configurationProvider": "platformio.platformio-ide",
+  "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}",
+        "--background-index",
+        "--completion-style=detailed"
+  ]
 }
