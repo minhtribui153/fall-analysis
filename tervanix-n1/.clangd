@@ -1,19 +1,13 @@
 CompileFlags:
   CompilationDatabase: .
-  Add:
-    - --target=riscv32-esp-elf
-    - -std=gnu17
   Remove:
     - -mlongcalls
-    - -mtext-section-literals
+    - -mdisable-hardware-atomics
+    - -mfix-esp32-psram-cache-issue
+    - -mfix-esp32-psram-cache-strategy=*
     - -fstrict-volatile-bitfields
     - -fno-tree-switch-conversion
     - -fno-shrink-wrap
-    - -fmacro-prefix-map=*
-    - -ffile-prefix-map=*
-    - -fdebug-prefix-map=*
-    - -fzero-init-padding-bits=all
-    - -fno-malloc-dce
 
 Diagnostics:
   Suppress:
@@ -24,3 +18,5 @@ Diagnostics:
     - unknown_typename
     - unused-includes
     - unused-macros
+    - redefinition_different_kind
+    - undeclared_var_use_suggest
