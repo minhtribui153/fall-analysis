@@ -1,6 +1,13 @@
-# This file was automatically generated for projects
-# without default 'CMakeLists.txt' file.
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "ble_advertiser.cpp"
+        "gatt_server.cpp"
+    INCLUDE_DIRS
+        "."
 
-FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
-
-idf_component_register(SRCS ${app_sources})
+    REQUIRES
+        bt
+        nvs_flash
+        esp_hw_support
+)
