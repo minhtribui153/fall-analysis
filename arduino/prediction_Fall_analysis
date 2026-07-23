@@ -1,0 +1,124 @@
+#include <TensorFlowLite_ESP32.h>
+#include "tensorflow/lite/micro/all_ops_resolver.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/micro/micro_error_reporter.h"
+
+// Include your generated C-array model
+#include "model.h"
+
+// Globals
+const tflite::Model* model = nullptr;
+tflite::MicroInterpreter* interpreter = nullptr;
+tflite::ErrorReporter* error_reporter = nullptr;
+TfLiteTensor* input = nullptr;
+TfLiteTensor* output = nullptr;
+
+// Tensor Arena (Memory allocated for model variables/activations)
+// The Nesso N1 has 512KB SRAM, so allocating 32KB is very safe and prevents memory errors.
+constexpr int kTensorArenaSize = 32 * 1024;
+uint8_t tensor_arena[kTensorArenaSize];
+
+// Constants matching our Python training
+const int WINDOW_SIZE = 50;
+const int NUM_FEATURES = 6;
+const int NUM_CLASSES = 8;
+
+const char* TARGET_CLASSES[] = {
+    "stationary", "walking", "running", "jumping", 
+    "falling", "near miss", "slipping", "falling from height"
+};
+
+void setup() {
+  Serial.begin(115200);
+  // Wait a moment for the Serial connection to establish over USB-C
+  delay(2000); 
+  
+  Serial.println("Initializing Nesso N1 Edge AI Model...");
+
+  // 1. Load the model from the model.h byte array
+  model = tflite::GetModel(har_model);
+  if (model->version() != TFLITE_SCHEMA_VERSION) {
+    Serial.println("Model provided is schema version not equal to supported version!");
+    while(1); // Halt
+  }
+
+  // 2. Pull in all the TFLM operations
+  static tflite::AllOpsResolver resolver;
+
+  // 2.5 Initialize Error Reporter
+  static tflite::MicroErrorReporter micro_error_reporter;
+  error_reporter = &micro_error_reporter;
+
+  // 3. Build the interpreter
+  static tflite::MicroInterpreter static_interpreter(
+      model, resolver, tensor_arena, kTensorArenaSize, error_reporter, nullptr, nullptr);
+  interpreter = &static_interpreter;
+
+  // 4. Allocate memory from the tensor_arena for the model's tensors
+  TfLiteStatus allocate_status = interpreter->AllocateTensors();
+  if (allocate_status != kTfLiteOk) {
+    Serial.println("AllocateTensors() failed. Try increasing kTensorArenaSize.");
+    while(1);
+  }
+
+  // 5. Assign input and output pointers
+  input = interpreter->input(0);
+  output = interpreter->output(0);
+  
+  Serial.println("Nesso N1 Initialization complete. Ready for inference.");
+  
+  // NOTE FOR BMI270 SENSOR:
+  // Initialize your Nesso N1 BMI270 sensor here:
+  // if (!IMU.begin()) { Serial.println("Failed to initialize IMU!"); while(1); }
+}
+
+void loop() {
+  // 6. Provide Sensor Data
+  // Right now, this uses dummy data. 
+  // To use the Nesso N1's onboard BMI270, you would loop 50 times (WINDOW_SIZE)
+  // reading IMU.readAcceleration(x, y, z) and IMU.readGyroscope(x, y, z)
+  
+  for (int i = 0; i < WINDOW_SIZE * NUM_FEATURES; i++) {
+    // Mock normalized float data (e.g., from StandardScaler)
+    float mock_sensor_val = 0.75f; 
+    
+    // Because our model is INT8 Quantized, we map float to int8
+    // based on the quantization parameters: zero_point and scale.
+    int8_t quantized_val = mock_sensor_val / input->params.scale + input->params.zero_point;
+    input->data.int8[i] = quantized_val;
+  }
+
+  // 7. Invoke Interpreter (Run Inference)
+  TfLiteStatus invoke_status = interpreter->Invoke();
+  if (invoke_status != kTfLiteOk) {
+    Serial.println("Invoke failed on data.");
+    return;
+  }
+
+  // 8. Process Output
+  // The output is an INT8 array. We find the max value to determine the predicted class.
+  int8_t max_val = -128;
+  int max_index = 0;
+  
+  for (int i = 0; i < NUM_CLASSES; i++) {
+    int8_t out_val = output->data.int8[i];
+    if (out_val > max_val) {
+      max_val = out_val;
+      max_index = i;
+    }
+  }
+
+  // Determine confidence by dequantizing the INT8 output back to a float (0.0 to 1.0)
+  float confidence = (max_val - output->params.zero_point) * output->params.scale;
+
+  // Print results to Serial Monitor
+  Serial.print("Prediction: ");
+  Serial.print(TARGET_CLASSES[max_index]);
+  Serial.print(" | Confidence: ");
+  Serial.print(confidence * 100);
+  Serial.println("%");
+
+  // Wait 1 second before the next inference window
+  delay(1000); 
+}
