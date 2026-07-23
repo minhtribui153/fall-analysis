@@ -3,6 +3,9 @@ idf_component_register(
         "main.cpp"
         "ble_advertiser.cpp"
         "gatt_server.cpp"
+        "wifi_manager.cpp"
+        "mqtt_publisher.cpp"
+        "imu_sensor.cpp"
     INCLUDE_DIRS
         "."
 
@@ -10,4 +13,10 @@ idf_component_register(
         bt
         nvs_flash
         esp_hw_support
+        esp_wifi
+        esp_netif
+        esp_event
+        mqtt
+        json
+        driver
 )
