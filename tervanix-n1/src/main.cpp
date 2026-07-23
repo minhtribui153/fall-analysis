@@ -1,7 +1,6 @@
-#include <cinttypes>
-
 #include "ble_advertiser.hpp"
-#include "esp_chip_info.h"
+#include "identity_store.hpp"
+
 #include "esp_err.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -9,15 +8,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#ifndef TERVANIX_BOARD_NAME
-#define TERVANIX_BOARD_NAME "Unknown"
-#endif
-
 namespace {
 
-constexpr char TAG[] = "tervanix";
+constexpr char tag[] = "main";
 
-esp_err_t initializeNvs()
+tervanix::identity::IdentityStore identity_store;
+
+esp_err_t initialize_nvs()
 {
     esp_err_t result = nvs_flash_init();
 
@@ -32,32 +29,52 @@ esp_err_t initializeNvs()
     return result;
 }
 
-}  // namespace
-
-extern "C" void app_main()
+void status_task(void*)
 {
-    ESP_ERROR_CHECK(initializeNvs());
-
-    esp_chip_info_t chipInfo {};
-    esp_chip_info(&chipInfo);
-
-    ESP_LOGI(TAG, "Tervanix starting");
-    ESP_LOGI(TAG, "Board: %s", TERVANIX_BOARD_NAME);
-    ESP_LOGI(TAG, "CPU cores: %d", chipInfo.cores);
-
-    ESP_ERROR_CHECK(
-        tervanix::ble::start_advertising()
-    );
-
-    uint32_t elapsedSeconds = 0;
-
     while (true) {
         ESP_LOGI(
-            TAG,
-            "Alive: %" PRIu32 " pings",
-            elapsedSeconds++
+            tag,
+            "BLE=%s registration=%s stored_uuid=%s",
+            tervanix::ble::connected()
+                ? "CONNECTED"
+                : "DISCONNECTED",
+            tervanix::ble::registered()
+                ? "REGISTERED"
+                : "WAITING",
+            identity_store.has_uuid()
+                ? "YES"
+                : "NO"
         );
 
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
+}
+
+}  // namespace
+
+extern "C" void app_main()
+{
+    ESP_ERROR_CHECK(initialize_nvs());
+    ESP_ERROR_CHECK(identity_store.begin());
+
+    ESP_LOGI(
+        tag,
+        "Stored UUID present: %s",
+        identity_store.has_uuid() ? "yes" : "no"
+    );
+
+    ESP_ERROR_CHECK(
+        tervanix::ble::start_registration_client(
+            identity_store
+        )
+    );
+
+    xTaskCreate(
+        status_task,
+        "status",
+        3072,
+        nullptr,
+        4,
+        nullptr
+    );
 }
