@@ -1,14 +1,11 @@
 #include "ble_advertiser.hpp"
-<<<<<<< HEAD
 #include "identity_store.hpp"
 
-=======
 #include "wifi_manager.hpp"
 #include "mqtt_publisher.hpp"
 #include "imu_sensor.hpp"
 
 #include "esp_chip_info.h"
->>>>>>> a69ccf294a734d93cb7944df03b1642da6bff309
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -19,13 +16,9 @@
 
 namespace {
 
-<<<<<<< HEAD
-constexpr char tag[] = "main";
-=======
 constexpr char TAG[] = "tervanix";
 constexpr int SAMPLE_RATE_HZ = 100;
 constexpr int BATCH_SIZE = 10;   // publish every 10 samples (10 messages/sec, not 100)
->>>>>>> a69ccf294a734d93cb7944df03b1642da6bff309
 
 tervanix::identity::IdentityStore identity_store;
 
@@ -44,10 +37,6 @@ esp_err_t initialize_nvs()
     return result;
 }
 
-<<<<<<< HEAD
-void status_task(void*)
-{
-=======
 // Uses the board's own WiFi MAC address as a stable device_id -- same
 // identifier convention as devices.identification in the backend schema,
 // and doesn't need any separate provisioning step to assign one.
@@ -119,7 +108,6 @@ extern "C" void app_main()
 
     uint32_t elapsedSeconds = 0;
 
->>>>>>> a69ccf294a734d93cb7944df03b1642da6bff309
     while (true) {
         ESP_LOGI(
             tag,
@@ -138,7 +126,6 @@ extern "C" void app_main()
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
-<<<<<<< HEAD
 
 }  // namespace
 
@@ -168,5 +155,3 @@ extern "C" void app_main()
         nullptr
     );
 }
-=======
->>>>>>> a69ccf294a734d93cb7944df03b1642da6bff309
