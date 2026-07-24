@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
-#include "imu_sensor.hpp"
+#include "imu/imu_sensor.hpp"
 
 namespace tervanix::mqtt {
 
@@ -13,6 +13,6 @@ namespace tervanix::mqtt {
     // 100Hz would mean 100 messages/sec per device, which is a lot of
     // network/broker overhead for not much benefit. Batching every 10
     // samples means 10 messages/sec instead.
-    void publish_batch(const ImuSample* samples, int count, const char* device_id);
+    void publish_batch(const sensor::ImuSample* samples, int count, const char* device_id);
 
 }  // namespace tervanix::mqtt

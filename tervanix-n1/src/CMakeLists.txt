@@ -6,7 +6,7 @@ idf_component_register(
         "gatt_server.cpp"
         "wifi_manager.cpp"
         "mqtt_publisher.cpp"
-        "imu_sensor.cpp"
+        "imu/imu_sensor.cpp"
     INCLUDE_DIRS
         "."
 
@@ -17,7 +17,9 @@ idf_component_register(
         esp_wifi
         esp_netif
         esp_event
+        esp_timer
         mqtt
         json
         driver
+        esp_driver_i2c
 )

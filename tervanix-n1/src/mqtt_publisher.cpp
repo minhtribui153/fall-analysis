@@ -1,5 +1,7 @@
 #include "mqtt_publisher.hpp"
 
+#include <cstdint>
+
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "cJSON.h"

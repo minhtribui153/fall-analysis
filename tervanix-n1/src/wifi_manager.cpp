@@ -1,5 +1,6 @@
 #include "wifi_manager.hpp"
 
+#include <cstdint>
 #include <cstring>
 
 #include "esp_log.h"

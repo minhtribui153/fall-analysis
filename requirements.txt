@@ -4,3 +4,5 @@ dbus-fast==5.0.22
 dbus-next==0.2.3
 psycopg==3.3.4
 python-dotenv==1.2.2
+asyncpg==0.31.0
+aiokafka==0.14.0

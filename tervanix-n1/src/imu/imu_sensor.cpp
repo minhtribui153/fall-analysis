@@ -1,4 +1,4 @@
-#include "imu_sensor.hpp"
+#include "imu/imu_sensor.hpp"
 
 #include "esp_log.h"
 
@@ -23,7 +23,7 @@ namespace {
     constexpr uint8_t BMI270_I2C_ADDR = 0x68;
 
     i2c_master_bus_handle_t i2c_bus_handle = nullptr;
-    bmi270_handle_t bmi270_handle = nullptr;
+    bmi270_handle_t* bmi270_handle = nullptr;
     bool imu_ready = false;
 
 }  // namespace
@@ -62,17 +62,12 @@ namespace tervanix::sensor {
             return ESP_FAIL;
         }
 
-        // TODO: the exact enum identifiers here are placeholders --
-        // bmi270.h (pulled in via the espressif/bmi270 component) has the
-        // real names, confirm once the dependency's actually added to the
-        // project. Aiming for 100Hz to match the sample rate the detection
-        // pipeline (and everything calibrated against real hardware data
-        // so far) assumes.
+        // 100Hz matches the sample rate used by the detection pipeline.
         const bmi270_config_t measurement_config = {
-            .acce_odr = BMI270_ACC_ODR_100HZ,
-            .acce_range = BMI270_ACC_RANGE_2G,
-            .gyro_odr = BMI270_GYR_ODR_100HZ,
-            .gyro_range = BMI270_GYR_RANGE_2000DPS,
+            .acce_odr = BMI270_ACC_ODR_100_HZ,
+            .acce_range = BMI270_ACC_RANGE_2_G,
+            .gyro_odr = BMI270_GYR_ODR_100_HZ,
+            .gyro_range = BMI270_GYR_RANGE_2000_DPS,
         };
 
         bmi_result = bmi270_start(bmi270_handle, &measurement_config);
@@ -92,9 +87,6 @@ namespace tervanix::sensor {
             return ESP_FAIL;
         }
 
-        // TODO: confirm the gyro getter's real name once the component's
-        // header is available -- bmi270_get_gyro_data by naming symmetry
-        // with bmi270_get_acce_data, but not directly confirmed.
         int result = bmi270_get_acce_data(bmi270_handle, &out.ax, &out.ay, &out.az);
         if (result != 0) {
             ESP_LOGW(TAG, "Accel read failed: %d", result);
