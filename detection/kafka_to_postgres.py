@@ -20,6 +20,13 @@ Connector is actually running, check what it really produces (it may
 wrap the raw MQTT payload with extra metadata fields depending on how
 the connector's configured) and adjust `parse_message()` below to match.
 
+BLE registration comes first: a device_id only gets a row (and a
+node_uuid) here once n1_registration_server.py has already registered it
+over BLE -- see get_or_create_session() below. This consumer doesn't mint
+its own UUIDs anymore; it looks up the one node_registrations already
+assigned, so a physical device maps to exactly one UUID across both
+halves of the pipeline.
+
 Run:
     python kafka_to_postgres.py
 Config via environment variables (see the block below for defaults).
@@ -28,13 +35,15 @@ Config via environment variables (see the block below for defaults).
 import asyncio
 import json
 import os
-import uuid
 from datetime import datetime, timezone
 
 import asyncpg
 from aiokafka import AIOKafkaConsumer
+from dotenv import load_dotenv
 
 from detection import FallDetector
+
+load_dotenv()
 
 # ── Config -- override via environment variables ────────────────────────
 # Defaults match the team's compose.kafka.yaml / compose.postgres.yaml as
@@ -46,13 +55,40 @@ KAFKA_BROKER   = os.environ.get("KAFKA_BROKER", "localhost:19092")
 KAFKA_TOPIC    = os.environ.get("KAFKA_TOPIC", "sensor-readings")
 KAFKA_GROUP_ID = os.environ.get("KAFKA_GROUP_ID", "postgres-writer")
 
-DB_CONFIG = dict(
-    host=os.environ.get("PGHOST", "localhost"),
-    port=int(os.environ.get("PGPORT", 5432)),
-    database=os.environ.get("PGDATABASE", "wsh_pipeline"),  # match POSTGRES_DB in the team's .env
-    user=os.environ.get("PGUSER", "postgres"),               # match POSTGRES_USER in the team's .env
-    password=os.environ.get("PGPASSWORD", "yourpass"),       # match POSTGRES_PASSWORD in the team's .env
-)
+# Reuses the SAME POSTGRES_* env vars (from the project .env, see
+# .env.example) as n1_registration_server.py, instead of a separate
+# PG*-prefixed set with its own different-looking defaults. This consumer
+# reads rows from node_registrations that the registration server wrote,
+# so the two have to be pointed at the same database -- if they read
+# different env vars with different defaults, this could silently connect
+# to the wrong database and never find any registrations. POSTGRES_DB/
+# USER/PASSWORD are required (no silent fallback); DATABASE_URL can be
+# set instead if you'd rather pass a full DSN.
+def make_db_config() -> dict:
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        return {"dsn": database_url}
+
+    missing = [
+        name
+        for name in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Set DATABASE_URL or define: " + ", ".join(missing)
+        )
+
+    return dict(
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=int(os.environ.get("POSTGRES_PORT", 5432)),
+        database=os.environ["POSTGRES_DB"],
+        user=os.environ["POSTGRES_USER"],
+        password=os.environ["POSTGRES_PASSWORD"],
+    )
+
+
+DB_CONFIG = make_db_config()
 
 SAMPLE_RATE = 100     # must match whatever the firmware actually samples at
 READING_BATCH_SIZE = 50   # buffer this many raw readings before flushing to Postgres
@@ -89,21 +125,36 @@ class Pipeline:
 
     async def get_or_create_session(self, device_id):
         async with self.pool.acquire() as conn:
-            # register the device if this is the first time we've seen it --
-            # a stub row with just the identifier, real metadata (ble_address
-            # etc.) can be filled in later by whatever does proper device
-            # provisioning
-            row = await conn.fetchrow(
-                "SELECT device_id FROM devices.identification WHERE device_id = $1",
+            # node_registrations is owned by the BLE registration server
+            # (n1_registration_server.py) -- a device has to complete BLE
+            # registration there before it ever shows up here. We look up
+            # the node_uuid it was assigned over BLE rather than minting a
+            # new one on this side, so the same physical device maps to
+            # the same UUID everywhere. If there's no active registration
+            # yet, that's a real problem worth surfacing rather than
+            # quietly inventing an identity for a device nobody's
+            # confirmed the hardware for.
+            registration = await conn.fetchrow(
+                """SELECT node_uuid FROM node_registrations
+                   WHERE device_id = $1 AND active = TRUE""",
                 device_id,
             )
-            if row is None:
-                await conn.execute(
-                    """INSERT INTO devices.identification (device_id, node_uuid)
-                       VALUES ($1, $2)
-                       ON CONFLICT (device_id) DO NOTHING""",
-                    device_id, uuid.uuid4(),
+            if registration is None:
+                raise RuntimeError(
+                    f"Device {device_id} has no active BLE registration in "
+                    f"node_registrations -- it needs to register via BLE "
+                    f"before its readings can be logged"
                 )
+            node_uuid = registration["node_uuid"]
+
+            # register the device_id/node_uuid pairing here too, if this is
+            # the first time the Kafka side has seen it
+            await conn.execute(
+                """INSERT INTO devices.identification (device_id, node_uuid)
+                   VALUES ($1, $2)
+                   ON CONFLICT (device_id) DO NOTHING""",
+                device_id, node_uuid,
+            )
 
             # reuse an already-open session for this device if one exists,
             # otherwise start a new one
@@ -163,6 +214,8 @@ class Pipeline:
             await self._flush_readings(state)
 
         # keep last_seen_at honest -- this is what that column is for
+        # (shared with node_registrations.last_seen_at, which the BLE
+        # registration server updates on its own side)
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE devices.identification SET last_seen_at = NOW() WHERE device_id = $1",
@@ -207,7 +260,7 @@ def parse_message(raw_value: bytes):
 async def main():
     pipeline = Pipeline()
     await pipeline.connect()
-    print(f"Connected to Postgres at {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
+    print(f"Connected to Postgres ({'DSN' if 'dsn' in DB_CONFIG else DB_CONFIG.get('database')})")
 
     consumer = AIOKafkaConsumer(
         KAFKA_TOPIC,

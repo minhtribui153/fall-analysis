@@ -85,12 +85,21 @@ def make_database_url() -> str:
 DATABASE_URL = make_database_url()
 
 
+# NOTE ON NAMING: the wire protocol (registration_protocol.hpp /
+# REQUEST_FORMAT below) still calls the 6 raw MAC bytes coming off the
+# device "hardware_id" -- that's fine, it's just describing what's on the
+# wire. But everywhere this touches Postgres, the column/variable is
+# "device_id" (a formatted "AA:BB:CC:DD:EE:FF" string), matching
+# devices.identification.device_id used by the Kafka -> Postgres side of
+# the pipeline (detection/kafka_to_postgres.py). Previously this table
+# used a separate "hardware_id BYTEA" column, which meant the two halves
+# of the pipeline had no shared key to join on.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS node_registrations (
     registration_id BIGSERIAL PRIMARY KEY,
 
-    hardware_id BYTEA NOT NULL
-        CHECK (octet_length(hardware_id) = 6),
+    device_id TEXT NOT NULL
+        CHECK (device_id ~ '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'),
 
     node_uuid UUID NOT NULL UNIQUE,
 
@@ -102,15 +111,15 @@ CREATE TABLE IF NOT EXISTS node_registrations (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS
-    one_active_uuid_per_hardware
-ON node_registrations (hardware_id)
+    one_active_uuid_per_device
+ON node_registrations (device_id)
 WHERE active = TRUE;
 """
 
 
 @dataclass(frozen=True)
 class RegistrationRequest:
-    hardware_id: bytes
+    device_id: str
     current_uuid: uuid.UUID | None
     nonce: int
 
@@ -121,8 +130,12 @@ class RegistrationResult:
     node_uuid: uuid.UUID
 
 
-def hardware_id_text(value: bytes) -> str:
-    return ":".join(f"{byte:02X}" for byte in value)
+def format_device_id(raw_hardware_id: bytes) -> str:
+    """Formats the 6 raw MAC bytes off the wire into the same
+    "AA:BB:CC:DD:EE:FF" text form used everywhere else as device_id
+    (devices.identification.device_id, MQTT payloads' device_id field,
+    node_registrations.device_id)."""
+    return ":".join(f"{byte:02X}" for byte in raw_hardware_id)
 
 
 def parse_request(value: bytes) -> RegistrationRequest:
@@ -134,7 +147,7 @@ def parse_request(value: bytes) -> RegistrationRequest:
     (
         version,
         flags,
-        hardware_id,
+        raw_hardware_id,
         current_uuid_bytes,
         nonce,
     ) = struct.unpack(REQUEST_FORMAT, value)
@@ -150,7 +163,7 @@ def parse_request(value: bytes) -> RegistrationRequest:
             current_uuid = parsed
 
     return RegistrationRequest(
-        hardware_id=hardware_id,
+        device_id=format_device_id(raw_hardware_id),
         current_uuid=current_uuid,
         nonce=nonce,
     )
@@ -185,13 +198,13 @@ def assign_uuid(
                 """
                 SELECT node_uuid
                 FROM node_registrations
-                WHERE hardware_id = %s
+                WHERE device_id = %s
                   AND node_uuid = %s
                   AND active = TRUE
                 FOR UPDATE
                 """,
                 (
-                    request.hardware_id,
+                    request.device_id,
                     request.current_uuid,
                 ),
             ).fetchone()
@@ -201,12 +214,12 @@ def assign_uuid(
                     """
                     UPDATE node_registrations
                     SET last_seen_at = now()
-                    WHERE hardware_id = %s
+                    WHERE device_id = %s
                       AND node_uuid = %s
                       AND active = TRUE
                     """,
                     (
-                        request.hardware_id,
+                        request.device_id,
                         request.current_uuid,
                     ),
                 )
@@ -221,10 +234,10 @@ def assign_uuid(
             UPDATE node_registrations
             SET active = FALSE,
                 delinked_at = COALESCE(delinked_at, now())
-            WHERE hardware_id = %s
+            WHERE device_id = %s
               AND active = TRUE
             """,
-            (request.hardware_id,),
+            (request.device_id,),
         )
 
         assigned = uuid.uuid4()
@@ -232,14 +245,14 @@ def assign_uuid(
         connection.execute(
             """
             INSERT INTO node_registrations (
-                hardware_id,
+                device_id,
                 node_uuid,
                 active
             )
             VALUES (%s, %s, TRUE)
             """,
             (
-                request.hardware_id,
+                request.device_id,
                 assigned,
             ),
         )
@@ -291,8 +304,8 @@ class TervanixServer:
             request = parse_request(bytes(value))
 
             logger.info(
-                "Request hardware=%s current_uuid=%s nonce=%u",
-                hardware_id_text(request.hardware_id),
+                "Request device_id=%s current_uuid=%s nonce=%u",
+                request.device_id,
                 request.current_uuid,
                 request.nonce,
             )
