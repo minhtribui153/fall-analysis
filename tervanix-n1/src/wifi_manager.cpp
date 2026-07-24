@@ -9,7 +9,7 @@
 #include "esp_netif.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_group.h"
+#include "freertos/event_groups.h"
 
 namespace {
 
