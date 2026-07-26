@@ -3,7 +3,7 @@ idf_component_register(
         "main.cpp"
         "ble_advertiser.cpp"
         "identity_store.cpp"
-        "gatt_server.cpp"
+        "device_identity.cpp"
         "wifi_manager.cpp"
         "mqtt_publisher.cpp"
         "imu/imu_sensor.cpp"
