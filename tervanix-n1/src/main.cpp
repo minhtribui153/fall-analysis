@@ -3,7 +3,7 @@
 
 #include "wifi_manager.hpp"
 #include "mqtt_publisher.hpp"
-#include "imu_sensor.hpp"
+#include "imu/imu_sensor.hpp"
 
 #include "esp_chip_info.h"
 #include "esp_err.h"
@@ -83,7 +83,7 @@ void sensorSamplingTask(void* parameter)
 
 extern "C" void app_main()
 {
-    ESP_ERROR_CHECK(initializeNvs());
+    ESP_ERROR_CHECK(initialize_nvs());
 
     esp_chip_info_t chipInfo {};
     esp_chip_info(&chipInfo);
@@ -97,7 +97,7 @@ extern "C" void app_main()
     // useful to keep for local debugging/config until that's confirmed
     // it's safe to drop.
     ESP_ERROR_CHECK(
-        tervanix::ble::start_advertising()
+        tervanix::ble::start_registration_client(identity_store)
     );
 
     ESP_ERROR_CHECK(tervanix::wifi::connect());
@@ -106,11 +106,11 @@ extern "C" void app_main()
 
     xTaskCreate(sensorSamplingTask, "sensor_sampling", 4096, nullptr, 5, nullptr);
 
-    uint32_t elapsedSeconds = 0;
+    // uint32_t elapsedSeconds = 0;
 
     while (true) {
         ESP_LOGI(
-            tag,
+            TAG,
             "BLE=%s registration=%s stored_uuid=%s",
             tervanix::ble::connected()
                 ? "CONNECTED"
@@ -125,33 +125,4 @@ extern "C" void app_main()
 
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
-}
-
-}  // namespace
-
-extern "C" void app_main()
-{
-    ESP_ERROR_CHECK(initialize_nvs());
-    ESP_ERROR_CHECK(identity_store.begin());
-
-    ESP_LOGI(
-        tag,
-        "Stored UUID present: %s",
-        identity_store.has_uuid() ? "yes" : "no"
-    );
-
-    ESP_ERROR_CHECK(
-        tervanix::ble::start_registration_client(
-            identity_store
-        )
-    );
-
-    xTaskCreate(
-        status_task,
-        "status",
-        3072,
-        nullptr,
-        4,
-        nullptr
-    );
 }

@@ -8,7 +8,7 @@
 #include "esp_netif.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_group.h"
+#include "freertos/event_groups.h"
 
 namespace {
 
@@ -31,7 +31,7 @@ namespace {
     void on_wifi_event(
         void* argument,
         esp_event_base_t event_base,
-        std::int32_t event_id,
+        int32_t event_id,
         void* event_data)
     {
         (void)argument;

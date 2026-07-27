@@ -4,6 +4,7 @@
 #include "mqtt_client.h"
 #include "cJSON.h"
 #include "esp_timer.h"
+#include <cstdint>
 
 namespace {
 
@@ -22,7 +23,7 @@ namespace {
     void on_mqtt_event(
         void* argument,
         esp_event_base_t event_base,
-        std::int32_t event_id,
+        int32_t event_id,
         void* event_data)
     {
         (void)argument;
@@ -91,7 +92,7 @@ namespace tervanix::mqtt {
         // up (not included here yet) so the backend can make sense of
         // when readings actually happened relative to each other across
         // devices/restarts.
-        const std::int64_t now_ms = esp_timer_get_time() / 1000;
+        const int64_t now_ms = esp_timer_get_time() / 1000;
 
         for (int i = 0; i < count; ++i) {
             cJSON* reading = cJSON_CreateObject();

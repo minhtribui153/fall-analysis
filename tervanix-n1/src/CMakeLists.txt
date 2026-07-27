@@ -6,9 +6,11 @@ idf_component_register(
         "gatt_server.cpp"
         "wifi_manager.cpp"
         "mqtt_publisher.cpp"
-        "imu_sensor.cpp"
+        "imu/imu_sensor.cpp"
+
     INCLUDE_DIRS
-        "."
+        "../include"
+        "../include/imu"
 
     REQUIRES
         bt

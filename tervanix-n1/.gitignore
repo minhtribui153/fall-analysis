@@ -5,6 +5,7 @@
 .vscode/ipch
 
 build
+.cache
 
-
+managed_components
 compile_commands.json

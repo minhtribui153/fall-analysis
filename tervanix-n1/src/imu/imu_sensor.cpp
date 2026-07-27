@@ -1,124 +1,151 @@
 #include "imu_sensor.hpp"
 
-#include "esp_log.h"
+#include <cstdint>
 
-#include "driver/i2c_master.h"
 #include "bmi270.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_err.h"
+#include "esp_log.h"
 
 namespace {
 
-    constexpr char TAG[] = "imu";
+constexpr char TAG[] = "imu";
 
-    // TODO: confirm against the actual board wiring -- these are placeholders.
-    // The Arduino NESSO N1 boards handle this internally via their own
-    // library, but this custom board's I2C pins need to be set explicitly.
-    constexpr gpio_num_t I2C_SDA_PIN = GPIO_NUM_21;
-    constexpr gpio_num_t I2C_SCL_PIN = GPIO_NUM_22;
-    constexpr uint32_t I2C_CLOCK_HZ = 400000;  // 400kHz, standard fast-mode I2C
+// Confirm these pins against the Nesso N1 schematic before flashing.
+constexpr gpio_num_t I2C_SDA_PIN = GPIO_NUM_21;
+constexpr gpio_num_t I2C_SCL_PIN = GPIO_NUM_22;
+constexpr std::uint32_t I2C_CLOCK_HZ = 400000;
+constexpr std::uint8_t BMI270_I2C_ADDR = BMI270_I2C_ADDRESS_L;
 
-    // TODO: confirm the BMI270's actual I2C address on this board -- it's
-    // one of two values depending on how the SDO pin is wired (0x68 if
-    // SDO is pulled low, 0x69 if pulled high). Check the schematic or
-    // scan the bus if unsure.
-    constexpr uint8_t BMI270_I2C_ADDR = 0x68;
+i2c_master_bus_handle_t i2c_bus_handle = nullptr;
+bmi270_handle_t* bmi270_handle = nullptr;
+bool imu_ready = false;
 
-    i2c_master_bus_handle_t i2c_bus_handle = nullptr;
-    bmi270_handle_t bmi270_handle = nullptr;
-    bool imu_ready = false;
+void cleanup_imu()
+{
+    imu_ready = false;
+
+    if (bmi270_handle != nullptr) {
+        (void)bmi270_stop(bmi270_handle);
+        (void)bmi270_delete(bmi270_handle);
+        bmi270_handle = nullptr;
+    }
+
+    if (i2c_bus_handle != nullptr) {
+        (void)i2c_del_master_bus(i2c_bus_handle);
+        i2c_bus_handle = nullptr;
+    }
+}
 
 }  // namespace
 
 namespace tervanix::sensor {
 
-    esp_err_t initialize_imu()
-    {
-        ESP_LOGI(TAG, "Initializing I2C bus");
-
-        i2c_master_bus_config_t bus_config {};
-        bus_config.i2c_port = I2C_NUM_0;
-        bus_config.sda_io_num = I2C_SDA_PIN;
-        bus_config.scl_io_num = I2C_SCL_PIN;
-        bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
-        bus_config.glitch_ignore_cnt = 7;
-        bus_config.flags.enable_internal_pullup = true;
-
-        esp_err_t result = i2c_new_master_bus(&bus_config, &i2c_bus_handle);
-        if (result != ESP_OK) {
-            ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(result));
-            return result;
-        }
-
-        ESP_LOGI(TAG, "Initializing BMI270");
-
-        const bmi270_driver_config_t driver_config = {
-            .addr = BMI270_I2C_ADDR,
-            .interface = BMI270_USE_I2C,
-            .i2c_bus = i2c_bus_handle,
-        };
-
-        int bmi_result = bmi270_create(&driver_config, &bmi270_handle);
-        if (bmi_result != 0) {
-            ESP_LOGE(TAG, "bmi270_create failed: %d", bmi_result);
-            return ESP_FAIL;
-        }
-
-        // TODO: the exact enum identifiers here are placeholders --
-        // bmi270.h (pulled in via the espressif/bmi270 component) has the
-        // real names, confirm once the dependency's actually added to the
-        // project. Aiming for 100Hz to match the sample rate the detection
-        // pipeline (and everything calibrated against real hardware data
-        // so far) assumes.
-        const bmi270_config_t measurement_config = {
-            .acce_odr = BMI270_ACC_ODR_100HZ,
-            .acce_range = BMI270_ACC_RANGE_2G,
-            .gyro_odr = BMI270_GYR_ODR_100HZ,
-            .gyro_range = BMI270_GYR_RANGE_2000DPS,
-        };
-
-        bmi_result = bmi270_start(bmi270_handle, &measurement_config);
-        if (bmi_result != 0) {
-            ESP_LOGE(TAG, "bmi270_start failed: %d", bmi_result);
-            return ESP_FAIL;
-        }
-
-        imu_ready = true;
-        ESP_LOGI(TAG, "BMI270 ready");
+esp_err_t initialize_imu()
+{
+    if (imu_ready) {
         return ESP_OK;
     }
 
-    esp_err_t read_imu(ImuSample& out)
-    {
-        if (!imu_ready) {
-            return ESP_FAIL;
-        }
+    // Recover cleanly if an earlier initialization attempt failed halfway.
+    cleanup_imu();
 
-        // TODO: confirm the gyro getter's real name once the component's
-        // header is available -- bmi270_get_gyro_data by naming symmetry
-        // with bmi270_get_acce_data, but not directly confirmed.
-        int result = bmi270_get_acce_data(bmi270_handle, &out.ax, &out.ay, &out.az);
-        if (result != 0) {
-            ESP_LOGW(TAG, "Accel read failed: %d", result);
-            return ESP_FAIL;
-        }
+    ESP_LOGI(TAG, "Initializing I2C bus on SDA=%d, SCL=%d at %lu Hz",
+             static_cast<int>(I2C_SDA_PIN),
+             static_cast<int>(I2C_SCL_PIN),
+             static_cast<unsigned long>(I2C_CLOCK_HZ));
 
-        result = bmi270_get_gyro_data(bmi270_handle, &out.gx, &out.gy, &out.gz);
-        if (result != 0) {
-            ESP_LOGW(TAG, "Gyro read failed: %d", result);
-            return ESP_FAIL;
-        }
+    i2c_master_bus_config_t bus_config{};
+    bus_config.i2c_port = I2C_NUM_0;
+    bus_config.sda_io_num = I2C_SDA_PIN;
+    bus_config.scl_io_num = I2C_SCL_PIN;
+    bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
+    bus_config.glitch_ignore_cnt = 7;
+    bus_config.flags.enable_internal_pullup = true;
 
-        // IMPORTANT, not yet verified: the detection pipeline (thresholds
-        // in detection.py, calibrated against real captured data from the
-        // Arduino NESSO N1 boards) assumes accel in g and gyro in deg/s.
-        // Once real readings come off this board, sanity-check at rest --
-        // accel magnitude should read ~1.0 (Earth's gravity, 1g), and gyro
-        // should read ~0 when the board isn't moving. If the numbers look
-        // off by a large, suspicious factor (e.g. ~9.8x too high, or in
-        // the 0.01-0.1 range instead of near 1.0), the driver's likely
-        // returning SI units (m/s^2, rad/s) instead -- convert here rather
-        // than downstream, so everything after this function can keep
-        // assuming g / deg/s like the rest of the pipeline does.
-        return ESP_OK;
+    esp_err_t result = i2c_new_master_bus(&bus_config, &i2c_bus_handle);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus initialization failed: %s", esp_err_to_name(result));
+        cleanup_imu();
+        return result;
     }
+
+    const bmi270_driver_config_t driver_config = {
+        .addr = BMI270_I2C_ADDR,
+        .interface = BMI270_USE_I2C,
+        .i2c_bus = i2c_bus_handle,
+    };
+
+    result = bmi270_create(&driver_config, &bmi270_handle);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "BMI270 creation failed at address 0x%02X: %s",
+                 BMI270_I2C_ADDR, esp_err_to_name(result));
+        cleanup_imu();
+        return result;
+    }
+
+    std::uint8_t chip_id = 0;
+    result = bmi270_get_chip_id(bmi270_handle, &chip_id);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read BMI270 chip ID: %s", esp_err_to_name(result));
+        cleanup_imu();
+        return result;
+    }
+
+    if (chip_id != BMI270_CHIP_ID) {
+        ESP_LOGE(TAG, "Unexpected BMI270 chip ID: 0x%02X (expected 0x%02X)",
+                 chip_id, BMI270_CHIP_ID);
+        cleanup_imu();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const bmi270_config_t measurement_config = {
+        .acce_odr = BMI270_ACC_ODR_100_HZ,
+        .acce_range = BMI270_ACC_RANGE_2_G,
+        .gyro_odr = BMI270_GYR_ODR_100_HZ,
+        .gyro_range = BMI270_GYR_RANGE_2000_DPS,
+    };
+
+    result = bmi270_start(bmi270_handle, &measurement_config);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "BMI270 start failed: %s", esp_err_to_name(result));
+        cleanup_imu();
+        return result;
+    }
+
+    imu_ready = true;
+    ESP_LOGI(TAG, "BMI270 ready (chip ID 0x%02X, accel ±2 g, gyro ±2000 dps, 100 Hz)",
+             chip_id);
+    return ESP_OK;
+}
+
+esp_err_t read_imu(ImuSample& out)
+{
+    if (!imu_ready || bmi270_handle == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ImuSample sample{};
+
+    esp_err_t result = bmi270_get_acce_data(
+        bmi270_handle, &sample.ax, &sample.ay, &sample.az);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Accelerometer read failed: %s", esp_err_to_name(result));
+        return result;
+    }
+
+    result = bmi270_get_gyro_data(
+        bmi270_handle, &sample.gx, &sample.gy, &sample.gz);
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "Gyroscope read failed: %s", esp_err_to_name(result));
+        return result;
+    }
+
+    // The Espressif driver already returns acceleration in g and angular
+    // velocity in degrees per second, matching the telemetry pipeline.
+    out = sample;
+    return ESP_OK;
+}
 
 }  // namespace tervanix::sensor
