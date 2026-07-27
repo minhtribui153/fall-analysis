@@ -15,11 +15,12 @@ namespace {
 
     constexpr char TAG[] = "wifi";
 
-    // TODO: replace with real credentials, or better, pull these from NVS /
-    // a provisioning step instead of hardcoding -- fine as a placeholder
-    // for getting the pipeline working end-to-end first.
-    constexpr char WIFI_SSID[] = "REPLACE_ME";
-    constexpr char WIFI_PASSWORD[] = "REPLACE_ME";
+    // Set via 'pio run -t menuconfig' -> Tervanix Wi-Fi, or directly in
+    // sdkconfig.nesso_n1 -- see tervanix-n1/src/Kconfig.projbuild. Kept
+    // out of source so nobody has to edit C++ to point the firmware at
+    // a different network.
+    constexpr char WIFI_SSID[] = CONFIG_TERVANIX_WIFI_SSID;
+    constexpr char WIFI_PASSWORD[] = CONFIG_TERVANIX_WIFI_PASSWORD;
 
     constexpr int WIFI_CONNECTED_BIT = BIT0;
     constexpr int WIFI_FAIL_BIT = BIT1;
@@ -62,6 +63,15 @@ namespace tervanix::wifi {
 
     esp_err_t connect()
     {
+        if (WIFI_SSID[0] == '\0') {
+            ESP_LOGE(
+                TAG,
+                "TERVANIX_WIFI_SSID is empty -- set it via menuconfig "
+                "(Tervanix Wi-Fi) before flashing"
+            );
+            return ESP_ERR_INVALID_STATE;
+        }
+
         wifi_event_group = xEventGroupCreate();
 
         ESP_ERROR_CHECK(esp_netif_init());

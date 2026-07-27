@@ -1,5 +1,7 @@
 #include "ble_advertiser.hpp"
 #include "identity_store.hpp"
+#include "device_identity.hpp"
+#include "esp_netif_sntp.h"
 
 #include "wifi_manager.hpp"
 #include "mqtt_publisher.hpp"
@@ -29,6 +31,7 @@ constexpr int BATCH_SIZE = 10;   // publish every 10 samples (10 messages/sec, n
 // before that will just get dropped with a warning on the consumer side.
 constexpr int BLE_REGISTRATION_TIMEOUT_MS = 20000;
 constexpr int BLE_POLL_INTERVAL_MS = 200;
+constexpr int SNTP_SYNC_TIMEOUT_MS = 10000;
 
 tervanix::identity::IdentityStore identity_store;
 
@@ -54,10 +57,11 @@ esp_err_t initialize_nvs()
 // assign one.
 void getDeviceId(char* out, size_t out_size)
 {
-    std::uint8_t mac[6] {};
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(out, out_size, "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    // Single source of truth shared with ble_advertiser.cpp's
+    // registration request -- see device_identity.hpp.
+    tervanix::identity::HardwareId mac {};
+    tervanix::identity::get_hardware_id(mac);
+    tervanix::identity::format_device_id(mac, out, out_size);
 }
 
 // Blocks (with a bounded timeout) until BLE registration finishes, so
@@ -102,6 +106,26 @@ void wait_for_ble_registration()
         "node_registrations until registration succeeds",
         BLE_REGISTRATION_TIMEOUT_MS
     );
+}
+
+void sync_time()
+{
+    ESP_LOGI(TAG, "Starting SNTP time sync");
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_TIMEOUT_MS)) != ESP_OK) {
+        ESP_LOGW(
+            TAG,
+            "SNTP sync did not complete within %dms -- readings published "
+            "before it finishes will carry an obviously-wrong timestamp",
+            SNTP_SYNC_TIMEOUT_MS
+        );
+        return;
+    }
+
+    ESP_LOGI(TAG, "SNTP sync complete");
 }
 
 void sensorSamplingTask(void* parameter)
@@ -193,6 +217,7 @@ extern "C" void app_main()
     wait_for_ble_registration();
 
     ESP_ERROR_CHECK(tervanix::wifi::connect());
+    sync_time();  // best-effort; publish_batch() degrades gracefully if this hasn't finished
     ESP_ERROR_CHECK(tervanix::mqtt::connect());
     ESP_ERROR_CHECK(tervanix::sensor::initialize_imu());
 

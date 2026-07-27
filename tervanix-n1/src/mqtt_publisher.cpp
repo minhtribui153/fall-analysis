@@ -6,17 +6,19 @@
 #include "mqtt_client.h"
 #include "cJSON.h"
 #include "esp_timer.h"
+#include <sys/time.h>
+#include <cstring>
 
 namespace {
 
     constexpr char TAG[] = "mqtt";
 
-    // TODO: replace with the real broker address once it's up. Using
-    // mqtt:// (unencrypted) for now to keep things simple while getting
-    // the pipeline working -- switch to mqtts:// once there's a cert to
-    // point at, since sensor data going out in the clear over WiFi isn't
-    // great long-term.
-    constexpr char MQTT_BROKER_URI[] = "mqtt://REPLACE_ME:1883";
+    // Set via 'pio run -t menuconfig' -> Tervanix MQTT, or directly in
+    // sdkconfig.nesso_n1. Must be the host's LAN IP, not "mosquitto" --
+    // that hostname only resolves inside the docker compose network.
+    // Still mqtt:// (unencrypted); switch to mqtts:// once there's a
+    // cert to point at.
+    constexpr char MQTT_BROKER_URI[] = CONFIG_TERVANIX_MQTT_BROKER_URI;
     constexpr char MQTT_TOPIC[] = "sensor-readings";
 
     esp_mqtt_client_handle_t client = nullptr;
@@ -52,6 +54,14 @@ namespace tervanix::mqtt {
 
     esp_err_t connect()
     {
+        if (std::strstr(MQTT_BROKER_URI, "CHANGE_ME") != nullptr) {
+            ESP_LOGW(
+                TAG,
+                "MQTT_BROKER_URI still has its placeholder value -- set "
+                "TERVANIX_MQTT_BROKER_URI via menuconfig"
+            );
+        }
+
         esp_mqtt_client_config_t config {};
         config.broker.address.uri = MQTT_BROKER_URI;
 
@@ -88,12 +98,16 @@ namespace tervanix::mqtt {
 
         cJSON* array = cJSON_CreateArray();
 
-        // epoch milliseconds -- esp_timer gives microseconds since boot,
-        // not wall-clock time. Real wall-clock timestamps need SNTP set
-        // up (not included here yet) so the backend can make sense of
-        // when readings actually happened relative to each other across
-        // devices/restarts.
-        const std::int64_t now_ms = esp_timer_get_time() / 1000;
+        // Real wall-clock epoch milliseconds, via SNTP (main.cpp calls
+        // sync_time() once after WiFi connects). If sync hasn't finished
+        // yet, gettimeofday() reads as an obviously-wrong ~1970 value
+        // rather than a plausible-but-wrong boot-relative one -- easier
+        // to spot and filter downstream (`WHERE ts < '2000-01-01'`).
+        struct timeval now_tv {};
+        gettimeofday(&now_tv, nullptr);
+        const std::int64_t now_ms =
+            static_cast<std::int64_t>(now_tv.tv_sec) * 1000 +
+            now_tv.tv_usec / 1000;
 
         for (int i = 0; i < count; ++i) {
             cJSON* reading = cJSON_CreateObject();

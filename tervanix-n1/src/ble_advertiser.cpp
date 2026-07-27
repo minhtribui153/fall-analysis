@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "registration_protocol.hpp"
+#include "device_identity.hpp"
 
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -821,9 +822,7 @@ esp_err_t start_registration_client(
     identity_store = &store;
 
     const esp_err_t mac_result =
-        esp_efuse_mac_get_default(
-            hardware_id.data()
-        );
+        tervanix::identity::get_hardware_id(hardware_id);
 
     if (mac_result != ESP_OK) {
         return mac_result;
