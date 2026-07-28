@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "registration_protocol.hpp"
+#include "telemetry_protocol.hpp"
 #include "device_identity.hpp"
 
 #include "esp_log.h"
@@ -52,6 +53,15 @@ const ble_uuid128_t registration_uuid = BLE_UUID128_INIT(
     0x01, 0x00, 0xb2, 0x7d
 );
 
+const ble_uuid128_t telemetry_uuid = BLE_UUID128_INIT(
+    0x00, 0x00, 0x34, 0x12,
+    0xf8, 0x2c,
+    0x91, 0xa9,
+    0x8d, 0x4d,
+    0x8d, 0x6e,
+    0x02, 0x00, 0xb2, 0x7d
+);
+
 tervanix::identity::IdentityStore* identity_store = nullptr;
 
 std::array<std::uint8_t, 6> hardware_id {};
@@ -61,6 +71,9 @@ std::uint16_t connection_handle = invalid_handle;
 std::uint16_t service_start_handle = 0;
 std::uint16_t service_end_handle = 0;
 std::uint16_t registration_value_handle = 0;
+std::uint16_t telemetry_value_handle = 0;
+
+std::uint32_t next_sample_sequence = 0;
 
 std::uint32_t pending_nonce = 0;
 
@@ -88,9 +101,11 @@ void reset_connection_state()
     service_start_handle = 0;
     service_end_handle = 0;
     registration_value_handle = 0;
+    telemetry_value_handle = 0;
 
     is_connecting = false;
     is_connected = false;
+    is_registered = false;
     pending_connect = false;
 }
 
@@ -113,7 +128,7 @@ void deferred_connect_task(void*)
 
     ESP_LOGI(
         tag,
-        "Connecting to Raspberry Pi"
+        "Connecting to BLE gateway"
     );
 
     const int result = ble_gap_connect(
@@ -491,6 +506,22 @@ int on_characteristic_discovered(
                     registration_value_handle
                 )
             );
+        } else if (
+            ble_uuid_cmp(
+                &characteristic->uuid.u,
+                &telemetry_uuid.u
+            ) == 0
+        ) {
+            telemetry_value_handle =
+                characteristic->val_handle;
+
+            ESP_LOGI(
+                tag,
+                "Telemetry characteristic handle=%u",
+                static_cast<unsigned>(
+                    telemetry_value_handle
+                )
+            );
         }
 
         return 0;
@@ -501,6 +532,14 @@ int on_characteristic_discovered(
             ESP_LOGE(
                 tag,
                 "Registration characteristic not found"
+            );
+            return 0;
+        }
+
+        if (telemetry_value_handle == 0) {
+            ESP_LOGE(
+                tag,
+                "Telemetry characteristic not found"
             );
             return 0;
         }
@@ -531,7 +570,7 @@ int on_service_discovered(
 
         ESP_LOGI(
             tag,
-            "Registration service handles=%u..%u",
+            "Gateway service handles=%u..%u",
             static_cast<unsigned>(service_start_handle),
             static_cast<unsigned>(service_end_handle)
         );
@@ -543,7 +582,7 @@ int on_service_discovered(
             service_start_handle == 0 ||
             service_end_handle == 0
         ) {
-            ESP_LOGE(tag, "Registration service not found");
+            ESP_LOGE(tag, "Gateway service not found");
             return 0;
         }
 
@@ -576,7 +615,7 @@ int on_service_discovered(
 
 void begin_service_discovery()
 {
-    ESP_LOGI(tag, "Discovering registration service");
+    ESP_LOGI(tag, "Discovering gateway service");
 
     const int result = ble_gattc_disc_svc_by_uuid(
         connection_handle,
@@ -618,10 +657,14 @@ int on_mtu_exchanged(
         static_cast<unsigned>(mtu)
     );
 
-    if (mtu < 31) {
+    constexpr std::uint16_t required_mtu =
+        sizeof(tervanix::protocol::TelemetryPacket) + 3;
+
+    if (mtu < required_mtu) {
         ESP_LOGE(
             tag,
-            "MTU too small; need at least 31"
+            "MTU too small; need at least %u for telemetry",
+            static_cast<unsigned>(required_mtu)
         );
         return 0;
     }
@@ -874,6 +917,69 @@ esp_err_t start_registration_client(
     return ESP_OK;
 }
 
+esp_err_t send_telemetry_batch(
+    const sensor::ImuSample* samples,
+    std::size_t count)
+{
+    if (
+        samples == nullptr ||
+        count == 0 ||
+        count > protocol::telemetry_samples_per_packet
+    ) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (
+        !is_connected ||
+        !is_registered ||
+        telemetry_value_handle == 0
+    ) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    protocol::TelemetryPacket packet {};
+    packet.version = protocol::telemetry_version;
+    packet.sample_count = static_cast<std::uint8_t>(count);
+    std::memcpy(
+        packet.hardware_id,
+        hardware_id.data(),
+        hardware_id.size()
+    );
+    packet.first_sample_sequence = next_sample_sequence;
+
+    for (std::size_t i = 0; i < count; ++i) {
+        packet.samples[i].ax = samples[i].ax;
+        packet.samples[i].ay = samples[i].ay;
+        packet.samples[i].az = samples[i].az;
+        packet.samples[i].gx = samples[i].gx;
+        packet.samples[i].gy = samples[i].gy;
+        packet.samples[i].gz = samples[i].gz;
+    }
+
+    // Advance even when the radio write fails. That way the gateway can
+    // detect a sequence gap on the next packet instead of silently hiding
+    // locally dropped samples.
+    next_sample_sequence += static_cast<std::uint32_t>(count);
+
+    const int result = ble_gattc_write_no_rsp_flat(
+        connection_handle,
+        telemetry_value_handle,
+        &packet,
+        sizeof(packet)
+    );
+
+    if (result != 0) {
+        ESP_LOGW(
+            tag,
+            "Telemetry write failed: %d",
+            result
+        );
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
 bool connected()
 {
     return is_connected;
@@ -882,6 +988,15 @@ bool connected()
 bool registered()
 {
     return is_registered;
+}
+
+bool telemetry_ready()
+{
+    return (
+        is_connected &&
+        is_registered &&
+        telemetry_value_handle != 0
+    );
 }
 
 }  // namespace tervanix::ble

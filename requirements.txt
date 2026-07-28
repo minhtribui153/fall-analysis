@@ -1,8 +1,9 @@
 bleak==3.0.2
-bless==0.3.0
+bless @ git+https://github.com/kevincar/bless.git
 dbus-fast==5.0.22
 dbus-next==0.2.3
 psycopg==3.3.4
 python-dotenv==1.2.2
+paho-mqtt==2.1.0
 asyncpg==0.31.0
 aiokafka==0.14.0

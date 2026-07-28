@@ -1,16 +1,11 @@
 #include "ble_advertiser.hpp"
 #include "identity_store.hpp"
-#include "device_identity.hpp"
-#include "esp_netif_sntp.h"
-
-#include "wifi_manager.hpp"
-#include "mqtt_publisher.hpp"
 #include "imu/imu_sensor.hpp"
+#include "telemetry_protocol.hpp"
 
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
@@ -20,18 +15,8 @@ namespace {
 
 constexpr char TAG[] = "tervanix";
 constexpr int SAMPLE_RATE_HZ = 100;
-constexpr int BATCH_SIZE = 10;   // publish every 10 samples (10 messages/sec, not 100)
-
-// How long to wait for BLE registration to finish before giving up and
-// falling back to whatever UUID (if any) is already stored in NVS from a
-// previous run. This matters now more than it used to: the Kafka ->
-// Postgres side of the pipeline (kafka_to_postgres.py) looks up this
-// device's node_uuid from node_registrations, which only has a row once
-// BLE registration has completed at least once -- readings published
-// before that will just get dropped with a warning on the consumer side.
-constexpr int BLE_REGISTRATION_TIMEOUT_MS = 20000;
-constexpr int BLE_POLL_INTERVAL_MS = 200;
-constexpr int SNTP_SYNC_TIMEOUT_MS = 10000;
+constexpr int BATCH_SIZE =
+    static_cast<int>(tervanix::protocol::telemetry_samples_per_packet);
 
 tervanix::identity::IdentityStore identity_store;
 
@@ -50,110 +35,59 @@ esp_err_t initialize_nvs()
     return result;
 }
 
-// Uses the board's own WiFi MAC address as a stable device_id -- same
-// identifier convention (and now the same column name) as
-// devices.identification.device_id / node_registrations.device_id in the
-// backend schema, and doesn't need any separate provisioning step to
-// assign one.
-void getDeviceId(char* out, size_t out_size)
-{
-    // Single source of truth shared with ble_advertiser.cpp's
-    // registration request -- see device_identity.hpp.
-    tervanix::identity::HardwareId mac {};
-    tervanix::identity::get_hardware_id(mac);
-    tervanix::identity::format_device_id(mac, out, out_size);
-}
-
-// Blocks (with a bounded timeout) until BLE registration finishes, so
-// WiFi/MQTT never start publishing readings under a device_id that
-// node_registrations doesn't know about yet -- BLE registration has to
-// happen first. If a UUID is already stored from a previous boot, it's
-// fine to fall through on timeout (the registration server just
-// re-confirms it rather than minting a new one), but a first-ever boot
-// with no stored UUID and no successful registration means readings from
-// this session won't have anywhere to land in Postgres.
 void wait_for_ble_registration()
 {
-    int waited_ms = 0;
+    ESP_LOGI(TAG, "Waiting for BLE gateway registration");
 
-    while (
-        !tervanix::ble::registered() &&
-        waited_ms < BLE_REGISTRATION_TIMEOUT_MS
-    ) {
-        vTaskDelay(pdMS_TO_TICKS(BLE_POLL_INTERVAL_MS));
-        waited_ms += BLE_POLL_INTERVAL_MS;
+    while (!tervanix::ble::registered()) {
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    if (tervanix::ble::registered()) {
-        ESP_LOGI(TAG, "BLE registration confirmed");
-        return;
-    }
-
-    if (identity_store.has_uuid()) {
-        ESP_LOGW(
-            TAG,
-            "BLE registration timed out after %dms; continuing with "
-            "previously stored UUID",
-            BLE_REGISTRATION_TIMEOUT_MS
-        );
-        return;
-    }
-
-    ESP_LOGE(
-        TAG,
-        "BLE registration timed out after %dms and no UUID is stored yet "
-        "-- readings published this session won't match a row in "
-        "node_registrations until registration succeeds",
-        BLE_REGISTRATION_TIMEOUT_MS
-    );
-}
-
-void sync_time()
-{
-    ESP_LOGI(TAG, "Starting SNTP time sync");
-
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&config);
-
-    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_TIMEOUT_MS)) != ESP_OK) {
-        ESP_LOGW(
-            TAG,
-            "SNTP sync did not complete within %dms -- readings published "
-            "before it finishes will carry an obviously-wrong timestamp",
-            SNTP_SYNC_TIMEOUT_MS
-        );
-        return;
-    }
-
-    ESP_LOGI(TAG, "SNTP sync complete");
+    ESP_LOGI(TAG, "BLE registration confirmed; telemetry can start");
 }
 
 void sensorSamplingTask(void* parameter)
 {
     (void)parameter;
 
-    char device_id[18] {};
-    getDeviceId(device_id, sizeof(device_id));
-    ESP_LOGI(TAG, "Device ID: %s", device_id);
-
     tervanix::sensor::ImuSample batch[BATCH_SIZE];
     int batch_index = 0;
 
-    const TickType_t sample_period = pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
+    const TickType_t sample_period =
+        pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
 
     while (true) {
         tervanix::sensor::ImuSample sample {};
+
         if (tervanix::sensor::read_imu(sample) == ESP_OK) {
             batch[batch_index++] = sample;
 
             if (batch_index >= BATCH_SIZE) {
-                tervanix::mqtt::publish_batch(batch, BATCH_SIZE, device_id);
+                if (tervanix::ble::telemetry_ready()) {
+                    const esp_err_t result =
+                        tervanix::ble::send_telemetry_batch(
+                            batch,
+                            BATCH_SIZE
+                        );
+
+                    if (
+                        result != ESP_OK &&
+                        result != ESP_ERR_INVALID_STATE
+                    ) {
+                        ESP_LOGW(
+                            TAG,
+                            "BLE telemetry send failed: %s",
+                            esp_err_to_name(result)
+                        );
+                    }
+                }
+
+                // If BLE is temporarily disconnected, this batch is dropped.
+                // The client automatically scans/reconnects and resumes sending
+                // after registration is confirmed again.
                 batch_index = 0;
             }
         }
-        // a failed read just gets skipped rather than retried immediately --
-        // worth keeping an eye on the "imu" log tag if this happens a lot,
-        // since it usually means an I2C bus issue rather than a one-off blip
 
         vTaskDelay(sample_period);
     }
@@ -166,13 +100,16 @@ void statusTask(void* parameter)
     while (true) {
         ESP_LOGI(
             TAG,
-            "BLE=%s registration=%s stored_uuid=%s",
+            "BLE=%s registration=%s telemetry=%s stored_uuid=%s",
             tervanix::ble::connected()
                 ? "CONNECTED"
                 : "DISCONNECTED",
             tervanix::ble::registered()
                 ? "REGISTERED"
                 : "WAITING",
+            tervanix::ble::telemetry_ready()
+                ? "READY"
+                : "PAUSED",
             identity_store.has_uuid()
                 ? "YES"
                 : "NO"
@@ -192,7 +129,7 @@ extern "C" void app_main()
     esp_chip_info_t chip_info {};
     esp_chip_info(&chip_info);
 
-    ESP_LOGI(TAG, "Tervanix starting");
+    ESP_LOGI(TAG, "Tervanix BLE telemetry firmware starting");
     ESP_LOGI(TAG, "Board: %s", TERVANIX_BOARD_NAME);
     ESP_LOGI(TAG, "CPU cores: %d", chip_info.cores);
     ESP_LOGI(
@@ -201,13 +138,8 @@ extern "C" void app_main()
         identity_store.has_uuid() ? "yes" : "no"
     );
 
-    // BLE registration goes first, on purpose: it's what assigns (or
-    // re-confirms) this device's UUID in node_registrations on the
-    // registration server, which the Kafka -> Postgres side of the
-    // pipeline now depends on to accept readings for this device_id.
-    // WiFi, MQTT, and sensor sampling only start once that's settled (or
-    // we've given up waiting and fallen back to a previously stored
-    // UUID -- see wait_for_ble_registration()).
+    // The Nesso is now BLE-only. It connects to TVX-REG, registers, and
+    // sends IMU packets to the gateway. The gateway handles MQTT/Kafka.
     ESP_ERROR_CHECK(
         tervanix::ble::start_registration_client(identity_store)
     );
@@ -216,9 +148,6 @@ extern "C" void app_main()
 
     wait_for_ble_registration();
 
-    ESP_ERROR_CHECK(tervanix::wifi::connect());
-    sync_time();  // best-effort; publish_batch() degrades gracefully if this hasn't finished
-    ESP_ERROR_CHECK(tervanix::mqtt::connect());
     ESP_ERROR_CHECK(tervanix::sensor::initialize_imu());
 
     xTaskCreate(

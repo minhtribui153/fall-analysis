@@ -12,8 +12,8 @@ namespace {
     // TODO: confirm against the actual board wiring -- these are placeholders.
     // The Arduino NESSO N1 boards handle this internally via their own
     // library, but this custom board's I2C pins need to be set explicitly.
-    constexpr gpio_num_t I2C_SDA_PIN = GPIO_NUM_21;
-    constexpr gpio_num_t I2C_SCL_PIN = GPIO_NUM_22;
+    constexpr gpio_num_t I2C_SDA_PIN = GPIO_NUM_10;
+    constexpr gpio_num_t I2C_SCL_PIN = GPIO_NUM_8;
     constexpr uint32_t I2C_CLOCK_HZ = 400000;  // 400kHz, standard fast-mode I2C
 
     // TODO: confirm the BMI270's actual I2C address on this board -- it's
