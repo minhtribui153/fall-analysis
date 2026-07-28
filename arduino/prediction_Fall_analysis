@@ -2,123 +2,207 @@
 #include "tensorflow/lite/micro/all_ops_resolver.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include "model.h" // The file containing your har_model[] array
 #include "tensorflow/lite/micro/micro_error_reporter.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
-// Include your generated C-array model
-#include "model.h"
+// Define unique UUIDs for the BLE Service and Characteristic
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8" 
 
-// Globals
+// --- TFLite Globals ---
 const tflite::Model* model = nullptr;
 tflite::MicroInterpreter* interpreter = nullptr;
-tflite::ErrorReporter* error_reporter = nullptr;
 TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
+tflite::ErrorReporter* error_reporter = nullptr;
 
-// Tensor Arena (Memory allocated for model variables/activations)
-// The Nesso N1 has 512KB SRAM, so allocating 32KB is very safe and prevents memory errors.
-constexpr int kTensorArenaSize = 32 * 1024;
+// Allocate memory for the model's tensors. 
+// You may need to tweak this size (e.g., 20 * 1024) if the ESP32 crashes on boot.
+constexpr int kTensorArenaSize = 15 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
 
-// Constants matching our Python training
-const int WINDOW_SIZE = 50;
-const int NUM_FEATURES = 6;
-const int NUM_CLASSES = 8;
+// --- BLE Globals ---
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+bool deviceConnected = false;
 
-const char* TARGET_CLASSES[] = {
-    "stationary", "walking", "running", "jumping", 
-    "falling", "near miss", "slipping", "falling from height"
+// Callbacks to handle PC connecting and disconnecting
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      Serial.println("PC Connected via BLE!");
+    };
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("PC Disconnected.");
+      // Restart advertising so it can reconnect
+      BLEDevice::startAdvertising(); 
+    }
 };
 
-void setup() {
-  Serial.begin(115200);
-  // Wait a moment for the Serial connection to establish over USB-C
-  delay(2000); 
+void setupBLE() {
+  BLEDevice::init("Nesso_N1_HAR"); // The name your PC will look for
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
   
-  Serial.println("Initializing Nesso N1 Edge AI Model...");
+  // Required for the PC to subscribe to the live stream
+  pCharacteristic->addDescriptor(new BLE2902());
 
-  // 1. Load the model from the model.h byte array
-  model = tflite::GetModel(har_model);
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    Serial.println("Model provided is schema version not equal to supported version!");
-    while(1); // Halt
-  }
-
-  // 2. Pull in all the TFLM operations
-  static tflite::AllOpsResolver resolver;
-
-  // 2.5 Initialize Error Reporter
-  static tflite::MicroErrorReporter micro_error_reporter;
-  error_reporter = &micro_error_reporter;
-
-  // 3. Build the interpreter
-  static tflite::MicroInterpreter static_interpreter(
-      model, resolver, tensor_arena, kTensorArenaSize, error_reporter, nullptr, nullptr);
-  interpreter = &static_interpreter;
-
-  // 4. Allocate memory from the tensor_arena for the model's tensors
-  TfLiteStatus allocate_status = interpreter->AllocateTensors();
-  if (allocate_status != kTfLiteOk) {
-    Serial.println("AllocateTensors() failed. Try increasing kTensorArenaSize.");
-    while(1);
-  }
-
-  // 5. Assign input and output pointers
-  input = interpreter->input(0);
-  output = interpreter->output(0);
-  
-  Serial.println("Nesso N1 Initialization complete. Ready for inference.");
-  
-  // NOTE FOR BMI270 SENSOR:
-  // Initialize your Nesso N1 BMI270 sensor here:
-  // if (!IMU.begin()) { Serial.println("Failed to initialize IMU!"); while(1); }
+  pService->start();
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);
+  BLEDevice::startAdvertising();
+  Serial.println("BLE Started. Waiting for PC to connect...");
 }
 
-void loop() {
-  // 6. Provide Sensor Data
-  // Right now, this uses dummy data. 
-  // To use the Nesso N1's onboard BMI270, you would loop 50 times (WINDOW_SIZE)
-  // reading IMU.readAcceleration(x, y, z) and IMU.readGyroscope(x, y, z)
-  
-  for (int i = 0; i < WINDOW_SIZE * NUM_FEATURES; i++) {
-    // Mock normalized float data (e.g., from StandardScaler)
-    float mock_sensor_val = 0.75f; 
+void setup() {
+    Serial.begin(115200);
+    setupBLE();
     
-    // Because our model is INT8 Quantized, we map float to int8
-    // based on the quantization parameters: zero_point and scale.
-    int8_t quantized_val = mock_sensor_val / input->params.scale + input->params.zero_point;
-    input->data.int8[i] = quantized_val;
-  }
+    // Set up the error reporter
+    static tflite::MicroErrorReporter micro_error_reporter;
+    error_reporter = &micro_error_reporter;
 
-  // 7. Invoke Interpreter (Run Inference)
-  TfLiteStatus invoke_status = interpreter->Invoke();
-  if (invoke_status != kTfLiteOk) {
-    Serial.println("Invoke failed on data.");
-    return;
-  }
-
-  // 8. Process Output
-  // The output is an INT8 array. We find the max value to determine the predicted class.
-  int8_t max_val = -128;
-  int max_index = 0;
-  
-  for (int i = 0; i < NUM_CLASSES; i++) {
-    int8_t out_val = output->data.int8[i];
-    if (out_val > max_val) {
-      max_val = out_val;
-      max_index = i;
+    // 1. Load the model from the C array
+    model = tflite::GetModel(har_model);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        TF_LITE_REPORT_ERROR(error_reporter, "Error: Model schema mismatch!");
+        return;
     }
-  }
 
-  // Determine confidence by dequantizing the INT8 output back to a float (0.0 to 1.0)
-  float confidence = (max_val - output->params.zero_point) * output->params.scale;
+    // 2. Pull in the operations the model needs
+    static tflite::AllOpsResolver resolver;
 
-  // Print results to Serial Monitor
-  Serial.print("Prediction: ");
-  Serial.print(TARGET_CLASSES[max_index]);
-  Serial.print(" | Confidence: ");
-  Serial.print(confidence * 100);
-  Serial.println("%");
+    // 3. Build the interpreter
+    static tflite::MicroInterpreter static_interpreter(
+        model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
+    interpreter = &static_interpreter;
 
-  // Wait 1 second before the next inference window
-  delay(1000); 
+    // 4. Allocate memory for the tensors
+    if (interpreter->AllocateTensors() != kTfLiteOk) {
+        TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensors() failed");
+        return;
+    }
+
+    // Assign pointers to the input and output tensors
+    input = interpreter->input(0);
+    output = interpreter->output(0);
+    
+    Serial.println("TFLite Model successfully loaded and ready.");
+}
+
+// 5. Define your window and buffer requirements
+const int samples_per_window = 75; // 3 seconds at 25Hz
+const int num_axes = 6;            // ax, ay, az, gx, gy, gz
+const int slide_step = 38;         // Slide by ~1.5 seconds (38 samples)
+
+// 2D Buffer to store continuous IMU data
+float imu_buffer[samples_per_window][num_axes];
+int current_sample_index = 0;
+unsigned long last_sample_time = 0;
+const unsigned long sample_interval_ms = 40; // 25Hz = 40ms per sample
+
+void loop() {
+    // Non-blocking timer to sample exactly at 25Hz
+    unsigned long current_time = millis();
+    if (current_time - last_sample_time >= sample_interval_ms) {
+        last_sample_time = current_time;
+
+        // --- READ YOUR IMU DATA HERE ---
+        // Replacing mock zeros with mock random data. 
+        // Replace these lines with your actual MPU6050 / IMU library read functions.
+        float ax = random(-100, 100) / 100.0f;
+        float ay = random(-100, 100) / 100.0f;
+        float az = random(-100, 100) / 100.0f;
+        float gx = random(-200, 200) / 10.0f;
+        float gy = random(-200, 200) / 10.0f;
+        float gz = random(-200, 200) / 10.0f;
+
+        // Store into the sliding window buffer
+        imu_buffer[current_sample_index][0] = ax;
+        imu_buffer[current_sample_index][1] = ay;
+        imu_buffer[current_sample_index][2] = az;
+        imu_buffer[current_sample_index][3] = gx;
+        imu_buffer[current_sample_index][4] = gy;
+        imu_buffer[current_sample_index][5] = gz;
+        
+        current_sample_index++;
+
+        // Once we have collected enough samples for a full window...
+        if (current_sample_index >= samples_per_window) {
+            
+            // 6. Populate the input tensor
+            int tensor_idx = 0;
+            for (int i = 0; i < samples_per_window; i++) {
+                for (int j = 0; j < num_axes; j++) {
+                    // Note: If using quantized INT8 model, you must scale & zero-point map this float.
+                    // Assuming float32 model for this example:
+                    input->data.f[tensor_idx++] = imu_buffer[i][j]; 
+                }
+            }
+
+            // 7. Run inference
+            if (interpreter->Invoke() != kTfLiteOk) {
+                Serial.println("Invoke failed!");
+                return;
+            }
+
+            // 8. Read the output predictions
+            float max_prob = 0.0f;
+            int predicted_class = -1;
+            int num_classes = 8; // Adjust based on your actual labels
+            
+            for (int i = 0; i < num_classes; i++) {
+                float prob = output->data.f[i]; 
+                if (prob > max_prob) {
+                    max_prob = prob;
+                    predicted_class = i;
+                }
+            }
+
+            // 9. Output the result locally
+            Serial.print("Detected Pattern Class: ");
+            Serial.print(predicted_class);
+            Serial.print(" | Confidence: ");
+            Serial.println(max_prob);
+
+            // 10. Send via BLE if connected
+            if (deviceConnected) {
+                // Package the latest snapshot of data alongside the prediction
+                String blePayload = String(ax) + "," + String(ay) + "," + String(az) + "," + 
+                                    String(gx) + "," + String(gy) + "," + String(gz) + "," + 
+                                    String(predicted_class) + "," + String(max_prob);
+
+                pCharacteristic->setValue(blePayload.c_str());
+                pCharacteristic->notify();
+                
+                Serial.println("Sent BLE: " + blePayload);
+            }
+
+            // 11. Slide the window for the overlap.
+            // Move the newest samples back to the beginning of the array.
+            int remaining_samples = samples_per_window - slide_step;
+            for (int i = 0; i < remaining_samples; i++) {
+                for (int j = 0; j < num_axes; j++) {
+                    imu_buffer[i][j] = imu_buffer[i + slide_step][j];
+                }
+            }
+            
+            // Set the index so the next reads fill in the remaining space
+            current_sample_index = remaining_samples;
+        }
+    }
 }
