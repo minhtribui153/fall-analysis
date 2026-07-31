@@ -167,8 +167,8 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS node_registrations (
     registration_id BIGSERIAL PRIMARY KEY,
 
-    device_id TEXT NOT NULL
-        CHECK (device_id ~ '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'),
+    hardware_id TEXT NOT NULL
+        CHECK (hardware_id ~ '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'),
 
     node_uuid UUID NOT NULL UNIQUE,
 
@@ -181,14 +181,14 @@ CREATE TABLE IF NOT EXISTS node_registrations (
 
 CREATE UNIQUE INDEX IF NOT EXISTS
     one_active_uuid_per_device
-ON node_registrations (device_id)
+ON node_registrations (hardware_id)
 WHERE active = TRUE;
 """
 
 
 @dataclass(frozen=True)
 class RegistrationRequest:
-    device_id: str
+    hardware_id: str
     current_uuid: uuid.UUID | None
     nonce: int
 
@@ -201,12 +201,12 @@ class RegistrationResult:
 
 @dataclass(frozen=True)
 class TelemetryPacket:
-    device_id: str
+    hardware_id: str
     first_sample_sequence: int
     samples: list[tuple[float, float, float, float, float, float]]
 
 
-def format_device_id(raw_hardware_id: bytes) -> str:
+def format_hardware_id(raw_hardware_id: bytes) -> str:
     return ":".join(f"{byte:02X}" for byte in raw_hardware_id)
 
 
@@ -235,7 +235,7 @@ def parse_request(value: bytes) -> RegistrationRequest:
             current_uuid = parsed
 
     return RegistrationRequest(
-        device_id=format_device_id(raw_hardware_id),
+        hardware_id=format_hardware_id(raw_hardware_id),
         current_uuid=current_uuid,
         nonce=nonce,
     )
@@ -283,7 +283,7 @@ def parse_telemetry(value: bytes) -> TelemetryPacket:
         )
 
     return TelemetryPacket(
-        device_id=format_device_id(raw_hardware_id),
+        hardware_id=format_hardware_id(raw_hardware_id),
         first_sample_sequence=first_sample_sequence,
         samples=samples,
     )
@@ -305,13 +305,13 @@ def assign_uuid(
                 """
                 SELECT node_uuid
                 FROM node_registrations
-                WHERE device_id = %s
+                WHERE hardware_id = %s
                   AND node_uuid = %s
                   AND active = TRUE
                 FOR UPDATE
                 """,
                 (
-                    request.device_id,
+                    request.hardware_id,
                     request.current_uuid,
                 ),
             ).fetchone()
@@ -321,12 +321,12 @@ def assign_uuid(
                     """
                     UPDATE node_registrations
                     SET last_seen_at = now()
-                    WHERE device_id = %s
+                    WHERE hardware_id = %s
                       AND node_uuid = %s
                       AND active = TRUE
                     """,
                     (
-                        request.device_id,
+                        request.hardware_id,
                         request.current_uuid,
                     ),
                 )
@@ -341,10 +341,10 @@ def assign_uuid(
             UPDATE node_registrations
             SET active = FALSE,
                 delinked_at = COALESCE(delinked_at, now())
-            WHERE device_id = %s
+            WHERE hardware_id = %s
               AND active = TRUE
             """,
-            (request.device_id,),
+            (request.hardware_id,),
         )
 
         assigned = uuid.uuid4()
@@ -352,14 +352,14 @@ def assign_uuid(
         connection.execute(
             """
             INSERT INTO node_registrations (
-                device_id,
+                hardware_id,
                 node_uuid,
                 active
             )
             VALUES (%s, %s, TRUE)
             """,
             (
-                request.device_id,
+                request.hardware_id,
                 assigned,
             ),
         )
@@ -512,8 +512,8 @@ class TervanixGateway:
             request = parse_request(bytes(value))
 
             logger.info(
-                "Registration request device_id=%s current_uuid=%s nonce=%u",
-                request.device_id,
+                "Registration request hardware_id=%s current_uuid=%s nonce=%u",
+                request.hardware_id,
                 request.current_uuid,
                 request.nonce,
             )
@@ -528,14 +528,14 @@ class TervanixGateway:
                 )
             )
 
-            self.registered_devices.add(request.device_id)
-            self.expected_sequence.pop(request.device_id, None)
+            self.registered_devices.add(request.hardware_id)
+            self.expected_sequence.pop(request.hardware_id, None)
 
             logger.info(
-                "Registration response status=%d uuid=%s device_id=%s",
+                "Registration response status=%d uuid=%s hardware_id=%s",
                 result.status,
                 result.node_uuid,
-                request.device_id,
+                request.hardware_id,
             )
 
         except Exception:
@@ -556,26 +556,26 @@ class TervanixGateway:
         try:
             packet = parse_telemetry(bytes(value))
 
-            if packet.device_id not in self.registered_devices:
+            if packet.hardware_id not in self.registered_devices:
                 logger.warning(
                     "Dropping telemetry from unregistered device %s",
-                    packet.device_id,
+                    packet.hardware_id,
                 )
                 return
 
-            expected = self.expected_sequence.get(packet.device_id)
+            expected = self.expected_sequence.get(packet.hardware_id)
             if (
                 expected is not None
                 and packet.first_sample_sequence != expected
             ):
                 logger.warning(
                     "Telemetry sequence gap for %s: expected=%u received=%u",
-                    packet.device_id,
+                    packet.hardware_id,
                     expected,
                     packet.first_sample_sequence,
                 )
 
-            self.expected_sequence[packet.device_id] = (
+            self.expected_sequence[packet.hardware_id] = (
                 packet.first_sample_sequence + len(packet.samples)
             ) & 0xFFFFFFFF
 
@@ -589,7 +589,7 @@ class TervanixGateway:
             )
 
             buffer = self.pending_readings.setdefault(
-                packet.device_id,
+                packet.hardware_id,
                 [],
             )
 
@@ -598,7 +598,7 @@ class TervanixGateway:
 
                 buffer.append(
                     {
-                        "device_id": packet.device_id,
+                        "hardware_id": packet.hardware_id,
                         "ts": first_ts
                         + index * TELEMETRY_SAMPLE_PERIOD_MS,
                         "ax": ax,
@@ -665,7 +665,7 @@ class TervanixGateway:
         )
         registration_permissions = (
             GATTAttributePermissions.readable
-            | GATTAttributePermissions.writable
+            | GATTAttributePermissions.writeable
         )
 
         await self.server.add_new_characteristic(
@@ -680,7 +680,7 @@ class TervanixGateway:
             GATTCharacteristicProperties.write
             | GATTCharacteristicProperties.write_without_response
         )
-        telemetry_permissions = GATTAttributePermissions.writable
+        telemetry_permissions = GATTAttributePermissions.writeable
 
         await self.server.add_new_characteristic(
             SERVICE_UUID,
@@ -708,11 +708,11 @@ class TervanixGateway:
             )
 
     def flush_pending_mqtt(self) -> None:
-        for device_id, buffer in self.pending_readings.items():
+        for hardware_id, buffer in self.pending_readings.items():
             if buffer:
                 logger.info(
                     "Publishing final partial batch for %s (%d readings)",
-                    device_id,
+                    hardware_id,
                     len(buffer),
                 )
                 self.mqtt.publish(buffer.copy())
