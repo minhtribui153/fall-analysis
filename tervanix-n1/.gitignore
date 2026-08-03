@@ -10,6 +10,7 @@ build
 
 managed_components
 compile_commands.json
+dependencies.lock
 
 sdkconfig.esp32_dev
 sdkconfig.esp32_dev.old
