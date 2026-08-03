@@ -6,5 +6,12 @@
 
 build
 
+.env
+
 managed_components
 compile_commands.json
+
+sdkconfig.esp32_dev
+sdkconfig.esp32_dev.old
+sdkconfig.nesso_n1
+sdkconfig.nesso_n1.old
