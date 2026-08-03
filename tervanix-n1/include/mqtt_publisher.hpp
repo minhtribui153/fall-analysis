@@ -1,18 +1,33 @@
 #pragma once
 
 #include "esp_err.h"
-#include "imu/imu_sensor.hpp"
+#include "telemetry.hpp"
 
-namespace tervanix::mqtt {
+namespace tervanix::mqtt
+{
+    /**
+     * @brief Connects to an MQTT broker
+     * @param broker_host The MQTT broker's host IP Address
+     * @param broker_port The MQTT broker's port
+     */
+    esp_err_t connect(const char *broker_host, std::uint16_t broker_port);
 
-    // Connects to the MQTT broker. Call after WiFi is connected.
-    esp_err_t connect();
+    bool connected();
 
-    // Publishes a batch of readings as one JSON message (an array), rather
-    // than one MQTT message per sample -- publishing individually at
-    // 100Hz would mean 100 messages/sec per device, which is a lot of
-    // network/broker overhead for not much benefit. Batching every 10
-    // samples means 10 messages/sec instead.
-    void publish_batch(const sensor::ImuSample* samples, int count, const char* device_id);
-
-}  // namespace tervanix::mqtt
+    /**
+     * @brief Publishes batches of IMU readings to MQTT broker
+     * @details This function will take in the stored samples and the requested number
+     * of samples per batch and converts them into a JSON array, rather than one
+     * MQTT message per sample.
+     *
+     * Once they are stored into a batch, these samples will be published
+     * depending on the specified maximum count of samples per batch.
+     * @param samples The data samples to publish to the MQTT broker
+     * @param max_count The maximum number of data samples allowed per batch
+     * @param device_id The ID of the device to be sent to.
+     */
+    void publish_batch(
+        const telemetry::ImuSample samples[],
+        int max_count,
+        const char *device_id);
+} // namespace tervanix::mqtt
