@@ -11,12 +11,16 @@ CompileFlags:
 
 Diagnostics:
   Suppress:
-    - expected
     - pp_file_not_found
     - implicit_function_decl
-    - undeclared_var_use
     - unknown_typename
-    - unused-includes
     - unused-macros
     - redefinition_different_kind
     - undeclared_var_use_suggest
+    - constexpr_var_requires_const_init
+    - undeclared_var_use
+    - typename_nested_not_found
+    - typecheck_cond_incompatible_operands
+  
+Documentation:
+  CommentFormat: Doxygen

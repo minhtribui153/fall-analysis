@@ -1,0 +1,31 @@
+BasedOnStyle: LLVM
+Language: Cpp
+
+# Indentation rules
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# Put function and namespace braces on a new line
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterNamespace: true
+  AfterControlStatement: Always
+
+# Indent everything inside the namespace
+NamespaceIndentation: All
+CompactNamespaces: true
+
+# Offset access modifiers (public, private)
+AccessModifierOffset: 0
+
+# Maintain clean wrapping for your Doxygen comments and long parameters
+ColumnLimit: 80
+CommentPragmas: '^ *@[a-z]+'
+
+# Force parameters to break onto their own individual lines when they wrap
+BinPackArguments: false
+BinPackParameters: false
+AlignAfterOpenBracket: AlwaysBreak
+AllowAllParametersOfDeclarationOnNextLine: false
