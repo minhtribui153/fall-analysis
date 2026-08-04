@@ -1,232 +1,197 @@
 #include "ble_advertiser.hpp"
-#include "identity_store.hpp"
+#include "board_config.hpp"
 #include "device_identity.hpp"
-#include "esp_netif_sntp.h"
-
-#include "wifi_manager.hpp"
+#include "esp_wifi.h"
+#include "identity_store.hpp"
 #include "mqtt_publisher.hpp"
+#include "peer_network.hpp"
+#include "registration_client.hpp"
+#include "registry_store.hpp"
+#include "wifi_manager.hpp"
+
+#if TERVANIX_HAS_IMU
 #include "imu/imu_sensor.hpp"
+#endif
 
 #include "esp_chip_info.h"
-#include "esp_err.h"
 #include "esp_log.h"
-#include "esp_mac.h"
-#include "nvs_flash.h"
-
+#include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
+#include <cstring>
+#include <sys/time.h>
 
-namespace {
-
-constexpr char TAG[] = "tervanix";
-constexpr int SAMPLE_RATE_HZ = 100;
-constexpr int BATCH_SIZE = 10;   // publish every 10 samples (10 messages/sec, not 100)
-
-// How long to wait for BLE registration to finish before giving up and
-// falling back to whatever UUID (if any) is already stored in NVS from a
-// previous run. This matters now more than it used to: the Kafka ->
-// Postgres side of the pipeline (kafka_to_postgres.py) looks up this
-// device's node_uuid from node_registrations, which only has a row once
-// BLE registration has completed at least once -- readings published
-// before that will just get dropped with a warning on the consumer side.
-constexpr int BLE_REGISTRATION_TIMEOUT_MS = 20000;
-constexpr int BLE_POLL_INTERVAL_MS = 200;
-constexpr int SNTP_SYNC_TIMEOUT_MS = 10000;
-
-tervanix::identity::IdentityStore identity_store;
-
-esp_err_t initialize_nvs()
+namespace
 {
-    esp_err_t result = nvs_flash_init();
+    constexpr char TAG[] = "tervanix";
+    constexpr int SAMPLE_RATE_HZ = 100;
+    constexpr int BATCH_SIZE = 10;
 
-    if (
-        result == ESP_ERR_NVS_NO_FREE_PAGES ||
-        result == ESP_ERR_NVS_NEW_VERSION_FOUND
-    ) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        result = nvs_flash_init();
-    }
+    tervanix::identity::IdentityStore identity_store;
+    tervanix::registry::RegistryStore registry_store;
 
-    return result;
-}
-
-// Uses the board's own WiFi MAC address as a stable device_id -- same
-// identifier convention (and now the same column name) as
-// devices.identification.device_id / node_registrations.device_id in the
-// backend schema, and doesn't need any separate provisioning step to
-// assign one.
-void getDeviceId(char* out, size_t out_size)
-{
-    // Single source of truth shared with ble_advertiser.cpp's
-    // registration request -- see device_identity.hpp.
-    tervanix::identity::HardwareId mac {};
-    tervanix::identity::get_hardware_id(mac);
-    tervanix::identity::format_device_id(mac, out, out_size);
-}
-
-// Blocks (with a bounded timeout) until BLE registration finishes, so
-// WiFi/MQTT never start publishing readings under a device_id that
-// node_registrations doesn't know about yet -- BLE registration has to
-// happen first. If a UUID is already stored from a previous boot, it's
-// fine to fall through on timeout (the registration server just
-// re-confirms it rather than minting a new one), but a first-ever boot
-// with no stored UUID and no successful registration means readings from
-// this session won't have anywhere to land in Postgres.
-void wait_for_ble_registration()
-{
-    int waited_ms = 0;
-
-    while (
-        !tervanix::ble::registered() &&
-        waited_ms < BLE_REGISTRATION_TIMEOUT_MS
-    ) {
-        vTaskDelay(pdMS_TO_TICKS(BLE_POLL_INTERVAL_MS));
-        waited_ms += BLE_POLL_INTERVAL_MS;
-    }
-
-    if (tervanix::ble::registered()) {
-        ESP_LOGI(TAG, "BLE registration confirmed");
-        return;
-    }
-
-    if (identity_store.has_uuid()) {
-        ESP_LOGW(
-            TAG,
-            "BLE registration timed out after %dms; continuing with "
-            "previously stored UUID",
-            BLE_REGISTRATION_TIMEOUT_MS
-        );
-        return;
-    }
-
-    ESP_LOGE(
-        TAG,
-        "BLE registration timed out after %dms and no UUID is stored yet "
-        "-- readings published this session won't match a row in "
-        "node_registrations until registration succeeds",
-        BLE_REGISTRATION_TIMEOUT_MS
-    );
-}
-
-void sync_time()
-{
-    ESP_LOGI(TAG, "Starting SNTP time sync");
-
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&config);
-
-    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_TIMEOUT_MS)) != ESP_OK) {
-        ESP_LOGW(
-            TAG,
-            "SNTP sync did not complete within %dms -- readings published "
-            "before it finishes will carry an obviously-wrong timestamp",
-            SNTP_SYNC_TIMEOUT_MS
-        );
-        return;
-    }
-
-    ESP_LOGI(TAG, "SNTP sync complete");
-}
-
-void sensorSamplingTask(void* parameter)
-{
-    (void)parameter;
-
-    char device_id[18] {};
-    getDeviceId(device_id, sizeof(device_id));
-    ESP_LOGI(TAG, "Device ID: %s", device_id);
-
-    tervanix::sensor::ImuSample batch[BATCH_SIZE];
-    int batch_index = 0;
-
-    const TickType_t sample_period = pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
-
-    while (true) {
-        tervanix::sensor::ImuSample sample {};
-        if (tervanix::sensor::read_imu(sample) == ESP_OK) {
-            batch[batch_index++] = sample;
-
-            if (batch_index >= BATCH_SIZE) {
-                tervanix::mqtt::publish_batch(batch, BATCH_SIZE, device_id);
-                batch_index = 0;
-            }
+    esp_err_t initialize_nvs()
+    {
+        auto r = nvs_flash_init();
+        if (r == ESP_ERR_NVS_NO_FREE_PAGES ||
+            r == ESP_ERR_NVS_NEW_VERSION_FOUND)
+        {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            r = nvs_flash_init();
         }
-        // a failed read just gets skipped rather than retried immediately --
-        // worth keeping an eye on the "imu" log tag if this happens a lot,
-        // since it usually means an I2C bus issue rather than a one-off blip
-
-        vTaskDelay(sample_period);
+        return r;
     }
-}
 
-void statusTask(void* parameter)
-{
-    (void)parameter;
-
-    while (true) {
-        ESP_LOGI(
-            TAG,
-            "BLE=%s registration=%s stored_uuid=%s",
-            tervanix::ble::connected()
-                ? "CONNECTED"
-                : "DISCONNECTED",
-            tervanix::ble::registered()
-                ? "REGISTERED"
-                : "WAITING",
-            identity_store.has_uuid()
-                ? "YES"
-                : "NO"
-        );
-
-        vTaskDelay(pdMS_TO_TICKS(5000));
+#if TERVANIX_HAS_IMU
+    void get_device_id(char *out, size_t n)
+    {
+        tervanix::identity::HardwareId id{};
+        ESP_ERROR_CHECK(tervanix::identity::get_hardware_id(id));
+        tervanix::identity::format_device_id(id, out, n);
     }
-}
+#endif
+    void wait_registration()
+    {
+        for (int ms = 0; !tervanix::ble::registered() && ms < 20000; ms += 200)
+            vTaskDelay(pdMS_TO_TICKS(200));
+        if (!tervanix::ble::registered() && !identity_store.has_uuid())
+            ESP_LOGW(
+                TAG, "No registration UUID yet; relay remains operational");
+    }
 
-}  // namespace
+    void sync_time()
+    {
+        esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        esp_netif_sntp_init(&c);
+        esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
+    }
+
+    void on_peer(const tervanix::telemetry::PeerSample &p)
+    {
+        if (tervanix::mqtt::connected())
+            tervanix::mqtt::publish_peer_sample(p);
+    }
+#if TERVANIX_HAS_IMU
+    void sample_task(void *)
+    {
+        char id[18]{};
+        get_device_id(id, sizeof(id));
+        tervanix::telemetry::ImuSample batch[BATCH_SIZE]{};
+        int idx = 0;
+        std::uint32_t seq = 1;
+        while (true)
+        {
+            tervanix::telemetry::ImuSample s{};
+            if (tervanix::sensor::read_imu(s) == ESP_OK)
+            {
+                batch[idx++] = s;
+                timeval tv{};
+                gettimeofday(&tv, nullptr);
+                tervanix::telemetry::PeerSample p{};
+                p.magic = tervanix::telemetry::PEER_MAGIC;
+                p.sequence = seq++;
+                p.ttl = 4;
+                std::memcpy(
+                    p.source_uuid,
+                    identity_store.uuid().data(),
+                    identity_store.uuid().size());
+                std::strncpy(p.device_id, id, sizeof(p.device_id) - 1);
+                p.timestamp_ms =
+                    (std::int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+                p.sample = s;
+                tervanix::peer::broadcast_sample(p);
+                if (idx == BATCH_SIZE)
+                {
+                    tervanix::mqtt::publish_batch(batch, BATCH_SIZE, id);
+                    idx = 0;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ));
+        }
+    }
+#endif
+    void status_task(void *)
+    {
+        while (true)
+        {
+            ESP_LOGI(
+                TAG,
+                "BLE=%s registration=%s WiFi=%s MQTT=%s role=%s",
+                tervanix::ble::connected() ? "up" : "down",
+                tervanix::ble::registered() ? "ok" : "waiting",
+                tervanix::wifi::is_connected() ? "up" : "down",
+                tervanix::mqtt::connected() ? "up" : "down",
+                TERVANIX_IS_RELAY ? "relay" : "sensor");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+    }
+} // namespace
 
 extern "C" void app_main()
 {
     ESP_ERROR_CHECK(initialize_nvs());
     ESP_ERROR_CHECK(identity_store.begin());
+    ESP_ERROR_CHECK(registry_store.begin());
+    ESP_LOGI(TAG, "Starting %s", TERVANIX_BOARD_NAME);
+    ESP_ERROR_CHECK(tervanix::ble::start_registration_client(identity_store));
 
-    esp_chip_info_t chip_info {};
-    esp_chip_info(&chip_info);
+    xTaskCreate(status_task, "status", 3072, nullptr, 4, nullptr);
+    wait_registration();
 
-    ESP_LOGI(TAG, "Tervanix starting");
-    ESP_LOGI(TAG, "Board: %s", TERVANIX_BOARD_NAME);
-    ESP_LOGI(TAG, "CPU cores: %d", chip_info.cores);
-    ESP_LOGI(
-        TAG,
-        "Stored UUID present: %s",
-        identity_store.has_uuid() ? "yes" : "no"
-    );
+    auto wr = tervanix::wifi::connect();
+    if (wr != ESP_OK)
+        ESP_LOGW(TAG, "No infrastructure Wi-Fi; peer relay remains active");
 
-    // BLE registration goes first, on purpose: it's what assigns (or
-    // re-confirms) this device's UUID in node_registrations on the
-    // registration server, which the Kafka -> Postgres side of the
-    // pipeline now depends on to accept readings for this device_id.
-    // WiFi, MQTT, and sensor sampling only start once that's settled (or
-    // we've given up waiting and fallen back to a previously stored
-    // UUID -- see wait_for_ble_registration()).
-    ESP_ERROR_CHECK(
-        tervanix::ble::start_registration_client(identity_store)
-    );
+    bool trusted = identity_store.has_uuid() &&
+                   identity_store.has_server_uuid() &&
+                   registry_store.contains(identity_store.uuid());
 
-    xTaskCreate(statusTask, "status", 3072, nullptr, 4, nullptr);
+    if (tervanix::wifi::is_connected())
+    {
+        char gateway_ip[16]{};
+        tervanix::wifi::get_gateway_ip(gateway_ip, sizeof(gateway_ip));
 
-    wait_for_ble_registration();
+        trusted =
+            tervanix::registration::verify_over_wifi(
+                identity_store, registry_store, gateway_ip, 8765U) == ESP_OK;
+        if (!trusted)
+        {
+            ESP_LOGE(
+                TAG,
+                "Identity or registrar mismatch; node rejects Wi-Fi and peer "
+                "networking");
+            esp_wifi_disconnect();
+            return;
+        }
+    }
 
-    ESP_ERROR_CHECK(tervanix::wifi::connect());
-    sync_time();  // best-effort; publish_batch() degrades gracefully if this hasn't finished
-    ESP_ERROR_CHECK(tervanix::mqtt::connect());
+    if (!trusted)
+    {
+        ESP_LOGE(
+            TAG,
+            "No previously verified registry snapshot; peer networking "
+            "disabled");
+        return;
+    }
+
+    ESP_ERROR_CHECK(tervanix::peer::start(registry_store));
+    tervanix::peer::set_receive_handler(on_peer);
+
+    if (tervanix::wifi::is_connected())
+    {
+        char gateway_ip[16]{};
+        tervanix::wifi::get_gateway_ip(gateway_ip, sizeof(gateway_ip));
+        sync_time();
+        auto mr = tervanix::mqtt::connect(gateway_ip, 1883U);
+        if (mr != ESP_OK)
+            ESP_LOGW(TAG, "MQTT unavailable; peer relay remains active");
+    }
+#if TERVANIX_HAS_IMU
     ESP_ERROR_CHECK(tervanix::sensor::initialize_imu());
-
-    xTaskCreate(
-        sensorSamplingTask,
-        "sensor_sampling",
-        4096,
-        nullptr,
-        5,
-        nullptr
-    );
+    xTaskCreate(sample_task, "sensor", 4096, nullptr, 5, nullptr);
+#else
+    ESP_LOGI(
+        TAG, "Networking-only ESP32 relay build: BMI270 and sampling excluded");
+#endif
 }
