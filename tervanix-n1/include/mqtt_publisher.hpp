@@ -30,4 +30,6 @@ namespace tervanix::mqtt
         const telemetry::ImuSample samples[],
         int max_count,
         const char *device_id);
+
+    void publish_peer_sample(const telemetry::PeerSample &sample);
 } // namespace tervanix::mqtt

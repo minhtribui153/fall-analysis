@@ -1,15 +1,15 @@
 #include "mqtt_publisher.hpp"
 
 #include <cstdint>
+#include <string>
 
+#include "cJSON.h"
 #include "esp_log.h"
 #include "mqtt_client.h"
-#include "cJSON.h"
-#include "esp_timer.h"
 #include <sys/time.h>
-#include <cstring>
 
-namespace {
+namespace
+{
 
     constexpr char TAG[] = "mqtt";
 
@@ -22,97 +22,107 @@ namespace {
     constexpr char MQTT_TOPIC[] = "sensor-readings";
 
     esp_mqtt_client_handle_t client = nullptr;
+    bool mqtt_connected = false;
 
     void on_mqtt_event(
-        void* argument,
+        void *argument,
         esp_event_base_t event_base,
         std::int32_t event_id,
-        void* event_data)
+        void *event_data)
     {
         (void)argument;
         (void)event_base;
         (void)event_data;
 
-        switch (event_id) {
-            case MQTT_EVENT_CONNECTED:
-                ESP_LOGI(TAG, "Connected to broker");
-                break;
-            case MQTT_EVENT_DISCONNECTED:
-                ESP_LOGW(TAG, "Disconnected from broker -- client will auto-reconnect");
-                break;
-            case MQTT_EVENT_ERROR:
-                ESP_LOGE(TAG, "MQTT error event");
-                break;
-            default:
-                break;
+        switch (event_id)
+        {
+        case MQTT_EVENT_CONNECTED:
+            mqtt_connected = true;
+            ESP_LOGI(TAG, "Connected to broker");
+            break;
+        case MQTT_EVENT_DISCONNECTED:
+            mqtt_connected = false;
+            ESP_LOGW(
+                TAG, "Disconnected from broker -- client will auto-reconnect");
+            break;
+        case MQTT_EVENT_ERROR:
+            ESP_LOGE(TAG, "MQTT error event");
+            break;
+        default:
+            break;
         }
     }
 
-}  // namespace
+} // namespace
 
-namespace tervanix::mqtt {
+namespace tervanix::mqtt
+{
 
-    esp_err_t connect()
+    esp_err_t connect(const char *broker_host, std::uint16_t broker_port)
     {
-        if (std::strstr(MQTT_BROKER_URI, "CHANGE_ME") != nullptr) {
-            ESP_LOGW(
-                TAG,
-                "MQTT_BROKER_URI still has its placeholder value -- set "
-                "TERVANIX_MQTT_BROKER_URI via menuconfig"
-            );
+        if (broker_host == nullptr || broker_host[0] == '\0')
+        {
+            return ESP_ERR_INVALID_ARG;
         }
 
-        esp_mqtt_client_config_t config {};
-        config.broker.address.uri = MQTT_BROKER_URI;
+        static char broker_uri[96];
+
+        const int written = std::snprintf(
+            broker_uri,
+            sizeof(broker_uri),
+            "mqtt://%s:%u",
+            broker_host,
+            static_cast<unsigned>(broker_port));
+
+        if (written < 0 ||
+            static_cast<std::size_t>(written) >= sizeof(broker_uri))
+        {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        esp_mqtt_client_config_t config{};
+
+        config.broker.address.uri = broker_uri;
 
         client = esp_mqtt_client_init(&config);
-        if (client == nullptr) {
-            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
-            return ESP_FAIL;
+
+        if (client == nullptr)
+        {
+            return ESP_ERR_NO_MEM;
         }
 
-        esp_mqtt_client_register_event(
-            client,
-            static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID),
-            on_mqtt_event,
-            nullptr);
+        ESP_ERROR_CHECK(esp_mqtt_client_register_event(
+            client, MQTT_EVENT_ANY, &on_mqtt_event, nullptr));
 
-        const esp_err_t result = esp_mqtt_client_start(client);
-        if (result != ESP_OK) {
-            ESP_LOGE(TAG, "esp_mqtt_client_start failed: %s", esp_err_to_name(result));
-            return result;
-        }
-
-        ESP_LOGI(TAG, "MQTT client started, connecting to %s", MQTT_BROKER_URI);
-        return ESP_OK;
+        return esp_mqtt_client_start(client);
     }
 
     void publish_batch(
-        const tervanix::sensor::ImuSample* samples,
+        const tervanix::telemetry::ImuSample *samples,
         int count,
-        const char* device_id)
+        const char *device_id)
     {
-        if (client == nullptr || count <= 0) {
+        if (client == nullptr || count <= 0)
+        {
             return;
         }
 
-        cJSON* array = cJSON_CreateArray();
+        cJSON *array = cJSON_CreateArray();
 
-        // Real wall-clock epoch milliseconds, via SNTP (main.cpp calls
-        // sync_time() once after WiFi connects). If sync hasn't finished
-        // yet, gettimeofday() reads as an obviously-wrong ~1970 value
-        // rather than a plausible-but-wrong boot-relative one -- easier
-        // to spot and filter downstream (`WHERE ts < '2000-01-01'`).
-        struct timeval now_tv {};
+        timeval now_tv{};
         gettimeofday(&now_tv, nullptr);
         const std::int64_t now_ms =
             static_cast<std::int64_t>(now_tv.tv_sec) * 1000 +
             now_tv.tv_usec / 1000;
 
-        for (int i = 0; i < count; ++i) {
-            cJSON* reading = cJSON_CreateObject();
+        for (int i = 0; i < count; ++i)
+        {
+            cJSON *reading = cJSON_CreateObject();
             cJSON_AddStringToObject(reading, "device_id", device_id);
-            cJSON_AddNumberToObject(reading, "ts", static_cast<double>(now_ms - (count - 1 - i) * 10));
+            cJSON_AddNumberToObject(
+                reading,
+                "ts",
+                static_cast<double>(now_ms - (count - 1 - i) * 10));
             cJSON_AddNumberToObject(reading, "ax", samples[i].ax);
             cJSON_AddNumberToObject(reading, "ay", samples[i].ay);
             cJSON_AddNumberToObject(reading, "az", samples[i].az);
@@ -122,15 +132,42 @@ namespace tervanix::mqtt {
             cJSON_AddItemToArray(array, reading);
         }
 
-        char* payload = cJSON_PrintUnformatted(array);
-        if (payload != nullptr) {
+        char *payload = cJSON_PrintUnformatted(array);
+        if (payload != nullptr)
+        {
             esp_mqtt_client_publish(client, MQTT_TOPIC, payload, 0, 1, 0);
             cJSON_free(payload);
-        } else {
+        } else
+        {
             ESP_LOGW(TAG, "Failed to serialize reading batch");
         }
 
         cJSON_Delete(array);
     }
 
-}  // namespace tervanix::mqtt
+    bool connected() { return mqtt_connected; }
+
+    void publish_peer_sample(const telemetry::PeerSample &peer)
+    {
+        if (client == nullptr || !mqtt_connected)
+            return;
+        cJSON *reading = cJSON_CreateObject();
+        cJSON_AddStringToObject(reading, "device_id", peer.device_id);
+        cJSON_AddNumberToObject(
+            reading, "ts", static_cast<double>(peer.timestamp_ms));
+        cJSON_AddNumberToObject(reading, "ax", peer.sample.ax);
+        cJSON_AddNumberToObject(reading, "ay", peer.sample.ay);
+        cJSON_AddNumberToObject(reading, "az", peer.sample.az);
+        cJSON_AddNumberToObject(reading, "gx", peer.sample.gx);
+        cJSON_AddNumberToObject(reading, "gy", peer.sample.gy);
+        cJSON_AddNumberToObject(reading, "gz", peer.sample.gz);
+        char *payload = cJSON_PrintUnformatted(reading);
+        if (payload)
+        {
+            esp_mqtt_client_publish(client, MQTT_TOPIC, payload, 0, 1, 0);
+            cJSON_free(payload);
+        }
+        cJSON_Delete(reading);
+    }
+
+} // namespace tervanix::mqtt
