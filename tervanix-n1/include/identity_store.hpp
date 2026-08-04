@@ -1,27 +1,29 @@
 #pragma once
 
+#include "esp_err.h"
 #include <array>
 #include <cstdint>
 
-#include "esp_err.h"
+namespace tervanix::identity
+{
+    using NodeUuid = std::array<std::uint8_t, 16>;
 
-namespace tervanix::identity {
+    class IdentityStore {
+        public:
+        esp_err_t begin();
+        esp_err_t save_uuid_once(const NodeUuid &uuid);
+        esp_err_t save_server_uuid_once(const NodeUuid &uuid);
+        esp_err_t clear_all();
 
-using NodeUuid = std::array<std::uint8_t, 16>;
+        bool has_uuid() const;
+        const NodeUuid &uuid() const;
+        bool has_server_uuid() const;
+        const NodeUuid &server_uuid() const;
 
-class IdentityStore {
-public:
-    esp_err_t begin();
-
-    bool has_uuid() const;
-    const NodeUuid& uuid() const;
-
-    esp_err_t save_uuid(const NodeUuid& uuid);
-    esp_err_t clear_uuid();
-
-private:
-    bool has_uuid_ = false;
-    NodeUuid uuid_ {};
-};
-
-}  // namespace tervanix::identity
+        private:
+        bool has_uuid_ = false;
+        bool has_server_uuid_ = false;
+        NodeUuid uuid_{};
+        NodeUuid server_uuid_{};
+    };
+} // namespace tervanix::identity

@@ -1,17 +1,18 @@
 #include "wifi_manager.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
-#include "esp_log.h"
-#include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_wifi.h"
 
-#include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
-namespace {
+namespace
+{
 
     constexpr char TAG[] = "wifi";
 
@@ -26,52 +27,76 @@ namespace {
     constexpr int WIFI_FAIL_BIT = BIT1;
     constexpr int MAX_RETRY = 5;
 
+    esp_netif_ip_info_t current_ip_info{};
+    bool have_ip_info = false;
+
     EventGroupHandle_t wifi_event_group = nullptr;
-    int retry_count = 0;
     bool connected = false;
 
-    void on_wifi_event(
-        void* argument,
+    void ip_event_handler(
+        void *,
         esp_event_base_t event_base,
-        std::int32_t event_id,
-        void* event_data)
+        int32_t event_id,
+        void *event_data)
     {
-        (void)argument;
-        (void)event_data;
+        if (event_base != IP_EVENT || event_id != IP_EVENT_STA_GOT_IP ||
+            event_data == nullptr)
+        {
+            return;
+        }
 
-        if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-            esp_wifi_connect();
-        } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-            connected = false;
-            if (retry_count < MAX_RETRY) {
-                esp_wifi_connect();
-                retry_count++;
-                ESP_LOGW(TAG, "Retrying connection (%d/%d)", retry_count, MAX_RETRY);
-            } else {
-                xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-            }
-        } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-            retry_count = 0;
-            connected = true;
+        const auto *event = static_cast<const ip_event_got_ip_t *>(event_data);
+
+        current_ip_info = event->ip_info;
+        have_ip_info = true;
+
+        ESP_LOGI(
+            TAG,
+            "sta ip: " IPSTR ", mask: " IPSTR ", gw: " IPSTR,
+            IP2STR(&current_ip_info.ip),
+            IP2STR(&current_ip_info.netmask),
+            IP2STR(&current_ip_info.gw));
+
+        if (wifi_event_group != nullptr)
+        {
             xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
         }
     }
 
-}  // namespace
+    void
+    on_wifi_event(void *, esp_event_base_t event_base, int32_t event_id, void *)
+    {
+        if (event_base != WIFI_EVENT)
+        {
+            return;
+        }
 
-namespace tervanix::wifi {
+        if (event_id == WIFI_EVENT_STA_START)
+        {
+            esp_wifi_connect();
+            return;
+        }
+
+        if (event_id == WIFI_EVENT_STA_DISCONNECTED)
+        {
+            have_ip_info = false;
+
+            if (wifi_event_group != nullptr)
+            {
+                xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+            }
+
+            esp_wifi_connect();
+        }
+    }
+
+} // namespace
+
+namespace tervanix::wifi
+{
 
     esp_err_t connect()
     {
-        if (WIFI_SSID[0] == '\0') {
-            ESP_LOGE(
-                TAG,
-                "TERVANIX_WIFI_SSID is empty -- set it via menuconfig "
-                "(Tervanix Wi-Fi) before flashing"
-            );
-            return ESP_ERR_INVALID_STATE;
-        }
-
         wifi_event_group = xEventGroupCreate();
 
         ESP_ERROR_CHECK(esp_netif_init());
@@ -81,21 +106,19 @@ namespace tervanix::wifi {
         wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
         ESP_ERROR_CHECK(esp_wifi_init(&init_config));
 
-        esp_event_handler_instance_t wifi_handler;
-        esp_event_handler_instance_t ip_handler;
+        ESP_ERROR_CHECK(esp_event_handler_register(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, nullptr));
 
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(
-            WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, nullptr, &wifi_handler));
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(
-            IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, nullptr, &ip_handler));
+        ESP_ERROR_CHECK(esp_event_handler_register(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, nullptr));
 
-        wifi_config_t wifi_config {};
+        wifi_config_t wifi_config{};
         std::strncpy(
-            reinterpret_cast<char*>(wifi_config.sta.ssid),
+            reinterpret_cast<char *>(wifi_config.sta.ssid),
             WIFI_SSID,
             sizeof(wifi_config.sta.ssid) - 1);
         std::strncpy(
-            reinterpret_cast<char*>(wifi_config.sta.password),
+            reinterpret_cast<char *>(wifi_config.sta.password),
             WIFI_PASSWORD,
             sizeof(wifi_config.sta.password) - 1);
         wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
@@ -103,6 +126,15 @@ namespace tervanix::wifi {
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
         ESP_ERROR_CHECK(esp_wifi_start());
+
+        if (WIFI_SSID[0] == '\0')
+        {
+            ESP_LOGW(
+                TAG,
+                "Wi-Fi SSID is empty; radio remains active for ESP-NOW relay "
+                "mode");
+            return ESP_ERR_INVALID_STATE;
+        }
 
         ESP_LOGI(TAG, "Connecting to %s...", WIFI_SSID);
 
@@ -113,7 +145,8 @@ namespace tervanix::wifi {
             pdFALSE,
             pdMS_TO_TICKS(15000));
 
-        if (bits & WIFI_CONNECTED_BIT) {
+        if (bits & WIFI_CONNECTED_BIT)
+        {
             ESP_LOGI(TAG, "Connected");
             return ESP_OK;
         }
@@ -122,9 +155,31 @@ namespace tervanix::wifi {
         return ESP_FAIL;
     }
 
-    bool is_connected()
+    bool is_connected() { return connected; }
+
+    esp_err_t get_gateway_ip(char *out, std::size_t out_size)
     {
-        return connected;
+        if (out == nullptr || out_size == 0)
+        {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        if (!have_ip_info)
+        {
+            out[0] = '\0';
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        const int written =
+            std::snprintf(out, out_size, IPSTR, IP2STR(&current_ip_info.gw));
+
+        if (written < 0 || static_cast<std::size_t>(written) >= out_size)
+        {
+            out[0] = '\0';
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        return ESP_OK;
     }
 
-}  // namespace tervanix::wifi
+} // namespace tervanix::wifi
