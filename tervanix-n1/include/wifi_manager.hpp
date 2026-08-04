@@ -2,17 +2,32 @@
 
 #include "esp_err.h"
 
+/**
+ * @file wifi_manager.hpp
+ * @brief Provides the legacy Wi-Fi station connection helper.
+ */
+
 namespace tervanix::wifi
 {
 
     /**
-     * @brief Initialize connection to WiFi
-     * @details Connects to WiFi in station mode and blocks until
-     * connected (or gives up after a timeout). Only call this
-     * function after NVS init before anything that needs network access.
+     * @brief Connects the device to the configured Wi-Fi network.
+     *
+     * This function initialises the ESP-IDF network stack, starts Wi-Fi in
+     * station mode, and blocks until the device connects or the retry timeout
+     * is reached.
+     *
+     * @return `ESP_OK` when the station obtains a connection,
+     *         `ESP_ERR_INVALID_STATE` when the configured SSID is empty, or
+     *         `ESP_FAIL` when the connection attempts are exhausted.
      */
     esp_err_t connect();
 
+    /**
+     * @brief Checks the latest Wi-Fi connection state recorded by the manager.
+     *
+     * @return `true` when the station is connected; otherwise, `false`.
+     */
     bool is_connected();
 
     /**
