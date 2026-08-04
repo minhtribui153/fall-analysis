@@ -1,0 +1,5 @@
+aiohttp>=3.10,<4
+bless>=0.2,<1
+dbus-next>=0.2,<1
+psycopg[binary]>=3.2,<4
+python-dotenv>=1,<2
