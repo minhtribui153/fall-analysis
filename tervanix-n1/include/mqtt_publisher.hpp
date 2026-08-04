@@ -3,16 +3,35 @@
 #include "esp_err.h"
 #include "imu/imu_sensor.hpp"
 
+/**
+ * @file mqtt_publisher.hpp
+ * @brief Provides the legacy direct MQTT telemetry publisher.
+ */
+
 namespace tervanix::mqtt {
 
-    // Connects to the MQTT broker. Call after WiFi is connected.
+    /**
+     * @brief Starts the MQTT client using the configured broker URI.
+     *
+     * The function creates the ESP-MQTT client and starts its asynchronous
+     * connection process. Network connectivity must already be available.
+     *
+     * @return `ESP_OK` when the client starts successfully; otherwise, an
+     *         ESP-IDF error code describing the initialisation failure.
+     */
     esp_err_t connect();
 
-    // Publishes a batch of readings as one JSON message (an array), rather
-    // than one MQTT message per sample -- publishing individually at
-    // 100Hz would mean 100 messages/sec per device, which is a lot of
-    // network/broker overhead for not much benefit. Batching every 10
-    // samples means 10 messages/sec instead.
+    /**
+     * @brief Publishes a batch of IMU readings as one JSON array.
+     *
+     * Each reading is timestamped and added to a single MQTT message to reduce
+     * broker and network overhead compared with publishing one message for each
+     * 100 Hz sample.
+     *
+     * @param[in] samples Pointer to the first sample in the batch.
+     * @param[in] count Number of samples to include in the JSON array.
+     * @param[in] device_id Null-terminated identifier attached to each reading.
+     */
     void publish_batch(const sensor::ImuSample* samples, int count, const char* device_id);
 
 }  // namespace tervanix::mqtt

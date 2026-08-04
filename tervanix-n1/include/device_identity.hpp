@@ -6,24 +6,49 @@
 
 #include "esp_err.h"
 
+/**
+ * @file device_identity.hpp
+ * @brief Provides the hardware identity used to identify a Nesso device.
+ */
+
 namespace tervanix::identity {
 
+/**
+ * @brief Represents the device's six-byte hardware identifier.
+ *
+ * The identifier is derived from the ESP32-C6 station MAC address and is used
+ * consistently by BLE registration, telemetry packets, and the database's
+ * `hardware_id` field.
+ */
 using HardwareId = std::array<std::uint8_t, 6>;
 
-// Single canonical source for this device's MAC-derived identity.
-// Both the BLE registration client (registration_protocol's
-// hardware_id field, see ble_advertiser.cpp) and the device_id string
-// used for MQTT/Kafka/Postgres (see main.cpp::getDeviceId) MUST read
-// from here. Previously these were two separate calls
-// (esp_efuse_mac_get_default vs esp_read_mac(ESP_MAC_WIFI_STA)) --
-// they happen to resolve to the same MAC under this project's default
-// 4-universal-MAC-address config, but there's no reason to derive the
-// same logical identity two different ways in two different files.
+/**
+ * @brief Retrieves the hardware identifier for the current device.
+ *
+ * This function reads the ESP32-C6 station MAC address and stores its six raw
+ * bytes in `out`.
+ *
+ * @param[out] out The buffer that receives the six-byte hardware identifier.
+ *
+ * @return `ESP_OK` when the identifier is read successfully; otherwise, an
+ *         ESP-IDF error code describing the failure.
+ */
 esp_err_t get_hardware_id(HardwareId& out);
 
-// Formats as "AA:BB:CC:DD:EE:FF" -- the same string form stored in
-// node_registrations.device_id and devices.identification.device_id.
-// out_size should be at least 18 (17 chars + null terminator).
+/**
+ * @brief Formats a hardware identifier as a readable MAC-address string.
+ *
+ * This function converts `id` to the uppercase format
+ * `AA:BB:CC:DD:EE:FF`, which can be used as the recognised `hardware_id`
+ * value throughout the data pipeline.
+ *
+ * @param[in] id The unformatted six-byte hardware identifier.
+ * @param[out] out The output buffer that receives the formatted string.
+ * @param[in] out_size The total size of the output buffer in bytes.
+ *
+ * @note `out_size` should be at least 18 bytes: 17 visible characters and
+ *       one null terminator.
+ */
 void format_device_id(const HardwareId& id, char* out, std::size_t out_size);
 
 }  // namespace tervanix::identity
