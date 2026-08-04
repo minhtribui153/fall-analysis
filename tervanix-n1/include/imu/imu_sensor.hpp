@@ -1,25 +1,28 @@
 #pragma once
 
 #include "esp_err.h"
+#include "telemetry.hpp"
 
-namespace tervanix::sensor {
+namespace tervanix::sensor
+{
 
-    struct ImuSample {
-        float ax;
-        float ay;
-        float az;
-        float gx;
-        float gy;
-        float gz;
-    };
+    using ImuSample = telemetry::ImuSample;
 
-    // Sets up the I2C bus and initializes the BMI270. Call once at startup,
-    // after NVS init.
+    /**
+     * @brief Initializes BMI270 IMU
+     * @details This function will set up the I2C bus and initializes the BMI270
+     * IMU sensor.
+     *
+     * This should be called once at statup after NVS initialization.
+     * @returns An error that can possibly happen while initializing the IMU.
+     */
     esp_err_t initialize_imu();
 
-    // Reads one sample. Returns ESP_FAIL if the sensor hasn't been
-    // initialized yet or the read failed -- caller should skip publishing
-    // that sample rather than send garbage.
-    esp_err_t read_imu(ImuSample& out);
+    /**
+     * @brief Reads an IMU sample
+     * @returns A `ESP_FAIL` error if the sensor hasn't been initialized yet
+     * or reading failed.
+     */
+    esp_err_t read_imu(ImuSample &out);
 
-}  // namespace tervanix::sensor
+} // namespace tervanix::sensor

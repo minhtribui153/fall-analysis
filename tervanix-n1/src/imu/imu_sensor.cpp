@@ -2,10 +2,11 @@
 
 #include "esp_log.h"
 
-#include "driver/i2c_master.h"
 #include "bmi270.h"
+#include "driver/i2c_master.h"
 
-namespace {
+namespace
+{
 
     constexpr char TAG[] = "imu";
 
@@ -14,7 +15,7 @@ namespace {
     // library, but this custom board's I2C pins need to be set explicitly.
     constexpr gpio_num_t I2C_SDA_PIN = GPIO_NUM_21;
     constexpr gpio_num_t I2C_SCL_PIN = GPIO_NUM_22;
-    constexpr uint32_t I2C_CLOCK_HZ = 400000;  // 400kHz, standard fast-mode I2C
+    constexpr uint32_t I2C_CLOCK_HZ = 400000; // 400kHz, standard fast-mode I2C
 
     // TODO: confirm the BMI270's actual I2C address on this board -- it's
     // one of two values depending on how the SDO pin is wired (0x68 if
@@ -23,18 +24,19 @@ namespace {
     constexpr uint8_t BMI270_I2C_ADDR = 0x68;
 
     i2c_master_bus_handle_t i2c_bus_handle = nullptr;
-    bmi270_handle_t* bmi270_handle = nullptr;
+    bmi270_handle_t *bmi270_handle = nullptr;
     bool imu_ready = false;
 
-}  // namespace
+} // namespace
 
-namespace tervanix::sensor {
+namespace tervanix::sensor
+{
 
     esp_err_t initialize_imu()
     {
         ESP_LOGI(TAG, "Initializing I2C bus");
 
-        i2c_master_bus_config_t bus_config {};
+        i2c_master_bus_config_t bus_config{};
         bus_config.i2c_port = I2C_NUM_0;
         bus_config.sda_io_num = I2C_SDA_PIN;
         bus_config.scl_io_num = I2C_SCL_PIN;
@@ -43,7 +45,8 @@ namespace tervanix::sensor {
         bus_config.flags.enable_internal_pullup = true;
 
         esp_err_t result = i2c_new_master_bus(&bus_config, &i2c_bus_handle);
-        if (result != ESP_OK) {
+        if (result != ESP_OK)
+        {
             ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(result));
             return result;
         }
@@ -57,7 +60,8 @@ namespace tervanix::sensor {
         };
 
         int bmi_result = bmi270_create(&driver_config, &bmi270_handle);
-        if (bmi_result != 0) {
+        if (bmi_result != 0)
+        {
             ESP_LOGE(TAG, "bmi270_create failed: %d", bmi_result);
             return ESP_FAIL;
         }
@@ -71,7 +75,8 @@ namespace tervanix::sensor {
         };
 
         bmi_result = bmi270_start(bmi270_handle, &measurement_config);
-        if (bmi_result != 0) {
+        if (bmi_result != 0)
+        {
             ESP_LOGE(TAG, "bmi270_start failed: %d", bmi_result);
             return ESP_FAIL;
         }
@@ -81,20 +86,24 @@ namespace tervanix::sensor {
         return ESP_OK;
     }
 
-    esp_err_t read_imu(ImuSample& out)
+    esp_err_t read_imu(ImuSample &out)
     {
-        if (!imu_ready) {
+        if (!imu_ready)
+        {
             return ESP_FAIL;
         }
 
-        int result = bmi270_get_acce_data(bmi270_handle, &out.ax, &out.ay, &out.az);
-        if (result != 0) {
+        int result =
+            bmi270_get_acce_data(bmi270_handle, &out.ax, &out.ay, &out.az);
+        if (result != 0)
+        {
             ESP_LOGW(TAG, "Accel read failed: %d", result);
             return ESP_FAIL;
         }
 
         result = bmi270_get_gyro_data(bmi270_handle, &out.gx, &out.gy, &out.gz);
-        if (result != 0) {
+        if (result != 0)
+        {
             ESP_LOGW(TAG, "Gyro read failed: %d", result);
             return ESP_FAIL;
         }
@@ -113,4 +122,4 @@ namespace tervanix::sensor {
         return ESP_OK;
     }
 
-}  // namespace tervanix::sensor
+} // namespace tervanix::sensor
