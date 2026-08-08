@@ -78,28 +78,24 @@ POST_EVENT_COOLDOWN  = 3.0  # seconds of quiet after an event before we'll trigg
 
 
 def _smv(ax, ay, az):
-    """Signal magnitude vector -- basically 'how much total acceleration',
-    ignoring which direction it's pointing."""
+    """Calculates the total acceleration magnitude."""
     return math.sqrt(ax ** 2 + ay ** 2 + az ** 2)
 
 
 def _gyro_magnitude(gx, gy, gz):
-    """Same idea but for rotation speed (deg/s). Used as supporting
-    evidence, not the main trigger -- a controlled motion like sitting
-    down can still spike gyro briefly without being a fall."""
+    """Calculates the total gyroscope magnitude."""
     return math.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
 
 
 def _tilt_angle(ax, ay, az):
-    """Roughly: how far off 'upright' is the device right now, in degrees.
+    """Calculates the device tilt angle in degrees.
 
-    Heads up: this assumes gravity mostly sits on the X axis when the
-    device is worn upright -- which is true for how the NESSO N1 sits
+    This assumes gravity mostly sits on the X axis when the
+    device is worn upright which is true for how the NESSO N1 sits
     on a waist clip, confirmed against real walking data (ax averaged
     around -0.91g at rest). If someone mounts the device differently
     (different clip angle, different body position), this axis
-    assumption breaks and tilt readings will be meaningless. Worth
-    double-checking if a second sensor gets added with a different mount.
+    assumption breaks and tilt readings will be meaningless.
     """
     mag = _smv(ax, ay, az)
     if mag == 0:
@@ -131,16 +127,16 @@ class ActivityClassifier:
     the person's doing right now: stationary, walking, running, or
     jumping.
 
-    This is intentionally simple -- no FFT, no ML, just basic stats on
+    This is intentionally simple, no FFT, no ML, just basic stats on
     the accel magnitude over a short window. It won't win any research
     awards, but it correctly identifies all four states on real
-    continuous recordings (stationary, walking, running, jumping --
+    continuous recordings (stationary, walking, running, jumping with
     ~300-400 samples each, done back to back) once the window has
     enough data to say something.
 
     Worth knowing how walking/running/jumping actually get told apart:
     walking never dips below 0.6g in the real data (lowest recorded was
-    0.678g), while running and jumping both do, repeatedly -- so "any
+    0.678g), while running and jumping both do, repeatedly, so "any
     dip at all" is what separates walking from the other two. Running
     and jumping then split on how OFTEN they dip: running's stride
     cycle is faster (~11 dips/sec in the recording) than a jump's
@@ -154,8 +150,8 @@ class ActivityClassifier:
     destabilization phase can look a lot like a jump's dip-then-spike
     signature. So `activity_before_event` on a FALL result sometimes
     reflects the fall's own onset rather than what the person was
-    genuinely doing a second earlier -- seen this happen a few times
-    in testing. Not a bug exactly, just a real limit of using a short
+    genuinely doing a second earlier, seen this happen a few times
+    in testing. Not a bug tbh, just some limit of using a short
     rolling window right up against the moment something dramatic
     starts happening.
 

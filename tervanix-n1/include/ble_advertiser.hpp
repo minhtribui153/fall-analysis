@@ -29,48 +29,35 @@ namespace tervanix::ble
     bool connected();
     bool registered();
     /**
-     * @brief Sends a batch of IMU samples to the connected BLE gateway.
-     *
-     * The samples are encoded into one fixed-size telemetry packet and sent to
-     * the gateway using a GATT write without response. The packet includes the
-     * device hardware identifier and the sequence number of its first sample.
-     *
-     * @param[in] samples Pointer to the first sample in a contiguous sample array.
-     * @param[in] count Number of valid samples to send. The value must be between
-     *                  1 and `protocol::telemetry_samples_per_packet`,
-     * inclusive.
-     *
-     * @return `ESP_OK` when the packet is queued successfully,
-     *         `ESP_ERR_INVALID_ARG` when the sample pointer or count is
-     * invalid, `ESP_ERR_INVALID_STATE` when telemetry is not ready, or
-     * `ESP_FAIL` when the BLE write cannot be started.
-     */
+    * @brief Sends a batch of IMU samples over BLE.
+    *
+    * @param[in] samples IMU samples to send.
+    * @param[in] count Number of samples in the batch.
+    *
+    * @return ESP_OK on success, otherwise an ESP-IDF error code.
+    */
     esp_err_t
     send_telemetry_batch(const sensor::ImuSample *samples, std::size_t count);
 
     /**
-     * @brief Checks whether the Nesso currently has a BLE connection.
-     *
-     * @return `true` when connected to a gateway; otherwise, `false`.
-     */
+    * @brief Checks if the BLE gateway is connected.
+    *
+    * @return true if connected, otherwise false.
+    */
     bool connected();
 
     /**
-     * @brief Checks whether gateway registration has completed successfully.
-     *
-     * @return `true` when a registration response has been accepted and its UUID
-     *         has been stored; otherwise, `false`.
-     */
+    * @brief Checks if BLE registration is complete.
+    *
+    * @return true if registered, otherwise false.
+    */
     bool registered();
 
     /**
-     * @brief Checks whether the BLE link is ready to transmit telemetry.
-     *
-     * Telemetry is ready only when the gateway is connected, registration is
-     * complete, and the telemetry characteristic has been discovered.
-     *
-     * @return `true` when telemetry can be sent; otherwise, `false`.
-     */
+    * @brief Checks if BLE telemetry can be sent.
+    *
+    * @return true if telemetry is ready, otherwise false.
+    */
     bool telemetry_ready();
 
 } // namespace tervanix::ble

@@ -13,6 +13,7 @@ MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 
 
 def database_url() -> str:
+    """Builds the PostgreSQL connection URL."""
     if value := os.getenv("DATABASE_URL"):
         return value
     required = {name: os.getenv(name) for name in ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB")}
@@ -27,6 +28,7 @@ def database_url() -> str:
 
 
 def migrate() -> None:
+    """Applies database migrations in order."""
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not files:
         raise RuntimeError(f"No migrations found in {MIGRATIONS_DIR}")

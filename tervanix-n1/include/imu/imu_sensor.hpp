@@ -38,28 +38,21 @@ namespace tervanix::sensor
     };
 
     /**
-     * @brief Initialises the I2C bus and the onboard BMI270 IMU.
-     *
-     * The accelerometer and gyroscope are configured for the sampling rate and
-     * measurement ranges required by the telemetry pipeline. This function
-     * should be called once before `read_imu()`.
-     *
-     * @return `ESP_OK` when the sensor is ready; otherwise, an ESP-IDF error
-     *         code describing the initialisation failure.
-     */
+    * @brief Initialises the BMI270 IMU sensor.
+    *
+    * Sets up I2C and prepares the sensor for readings.
+    *
+    * @return ESP_OK on success, otherwise an ESP-IDF error code.
+    */
     esp_err_t initialize_imu();
 
     /**
-     * @brief Reads one accelerometer and gyroscope sample from the BMI270.
-     *
-     * @param[out] out The structure that receives the six sensor-axis values.
-     *
-     * @return `ESP_OK` when the complete sample is read successfully;
-     *         otherwise, `ESP_FAIL` when the sensor is not initialised or a
-     *         sensor read fails.
-     *
-     * @pre `initialize_imu()` must have completed successfully.
-     */
+    * @brief Reads one sample from the BMI270.
+    *
+    * @param[out] out Stores the accelerometer and gyroscope values.
+    *
+    * @return ESP_OK on success, otherwise ESP_FAIL.
+    */
     esp_err_t read_imu(ImuSample &out);
 
 } // namespace tervanix::sensor

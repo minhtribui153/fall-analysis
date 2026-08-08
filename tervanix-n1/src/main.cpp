@@ -31,6 +31,11 @@ namespace
     tervanix::identity::IdentityStore identity_store;
     tervanix::registry::RegistryStore registry_store;
 
+    /**
+    * @brief Initialises NVS storage.
+    *
+    * @return ESP_OK on success, otherwise an ESP-IDF error code.
+    */
     esp_err_t initialize_nvs()
     {
         auto r = nvs_flash_init();
@@ -44,6 +49,12 @@ namespace
     }
 
 #if TERVANIX_HAS_IMU
+    /**
+    * @brief Gets the formatted hardware ID of the device.
+    *
+    * @param[out] out Stores the formatted hardware ID.
+    * @param[in] size Size of the output buffer.
+    */
     void get_device_id(char *out, size_t n)
     {
         tervanix::identity::HardwareId id{};
@@ -51,6 +62,10 @@ namespace
         tervanix::identity::format_device_id(id, out, n);
     }
 #endif
+
+    /**
+    * @brief Waits for BLE device registration to complete.
+    */
     void wait_registration()
     {
         for (int ms = 0; !tervanix::ble::registered() && ms < 20000; ms += 200)
