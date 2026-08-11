@@ -66,8 +66,16 @@ IS_DOWN_SUSTAIN_MIN  = 0.15 # seconds -- has to stay down for a beat, not just f
 ORIENTATION_SPIKE_THRESH = 20  # degrees -- how far they have to lean/rotate to count as "something happened"
 
 MAX_DROPPED_IN_A_ROW = 10   # bad packets in a row before we assume the link dropped
-POST_EVENT_COOLDOWN  = 3.0  # seconds of quiet after an event before we'll trigger again
 
+# Strong-fall override.
+# Based on the current real recording:
+# actual suspected fall ~= 3.0g / 331 deg/s
+# other events were < 2.5g / 230 deg/s
+STRONG_IMPACT_THRESH = 2.8
+STRONG_ROTATION_THRESH = 280
+
+# Slightly longer to reduce one movement generating several events.
+POST_EVENT_COOLDOWN = 6.0
 # A heads-up on FFH_FREEFALL_MIN: in testing, this hasn't actually been able to
 # tell a real height-fall apart from a same-level trip/slip -- both showed
 # similarly short freefall times, probably because staged test falls don't
@@ -447,17 +455,55 @@ class FallDetector:
         # All four have to agree -- any one on its own isn't reliable
         # enough (e.g. a hard knock without tumbling, or a lean without
         # actually going down).
-        if valid_impact and had_rotation_spike and had_orientation_spike and is_down:
-            # See the FFH_FREEFALL_MIN note near the top of the file --
-            # this split hasn't actually been validated against a real
-            # height fall yet, so don't take the FFH/STF label here as
-            # gospel, just a best guess.
+        # A very strong impact + rotation combination is enough to classify
+        # a fall even if the absolute "is_down" orientation check fails.
+        #
+        # This is useful because the waist-mounted sensor orientation can make
+        # a fixed posture threshold unreliable.
+        strong_fall_signature = (
+            max_smv >= STRONG_IMPACT_THRESH
+            and max_rotation >= STRONG_ROTATION_THRESH
+            and had_orientation_spike
+        )
+
+        # Normal fall path:
+        # impact + rotation + orientation disturbance must be present,
+        # followed by either:
+        #   - a detected lying/down posture, OR
+        #   - low movement after impact.
+        #
+        # This makes is_down supporting evidence rather than a hard requirement.
+        normal_fall_signature = (
+            valid_impact
+            and had_rotation_spike
+            and had_orientation_spike
+            and (is_down or is_still)
+        )
+
+        if strong_fall_signature or normal_fall_signature:
             fall_type = "FFH" if had_freefall else "STF"
-            return {**base, "event_type": "FALL", "fall_type": fall_type}
+            return {
+                **base,
+                "event_type": "FALL",
+                "fall_type": fall_type,
+            }
 
-        # NEAR_MISS: rotation spike + a real orientation disturbance,
-        # but they didn't end up down -- stumbled, caught themselves.
-        if had_rotation_spike and had_orientation_spike and not is_down:
-            return {**base, "event_type": "NEAR_MISS", "fall_type": None}
+        # Near miss:
+        # strong rotation + orientation disturbance occurred,
+        # but it did not satisfy either fall signature.
+        if (
+            had_rotation_spike
+            and had_orientation_spike
+            and not strong_fall_signature
+        ):
+            return {
+                **base,
+                "event_type": "NEAR_MISS",
+                "fall_type": None,
+            }
 
-        return {**base, "event_type": "NORMAL", "fall_type": None}
+        return {
+            **base,
+            "event_type": "NORMAL",
+            "fall_type": None,
+        }
