@@ -1,197 +1,380 @@
 #include "ble_advertiser.hpp"
 #include "board_config.hpp"
 #include "device_identity.hpp"
-#include "esp_wifi.h"
+#include "health_display.hpp"
 #include "identity_store.hpp"
 #include "mqtt_publisher.hpp"
-#include "peer_network.hpp"
-#include "registration_client.hpp"
-#include "registry_store.hpp"
 #include "wifi_manager.hpp"
 
 #if TERVANIX_HAS_IMU
 #include "imu/imu_sensor.hpp"
 #endif
 
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+
 #include "esp_chip_info.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "nvs_flash.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
-#include <cstring>
-#include <sys/time.h>
 
 namespace
 {
+
     constexpr char TAG[] = "tervanix";
     constexpr int SAMPLE_RATE_HZ = 100;
-    constexpr int BATCH_SIZE = 10;
+    constexpr int MQTT_BATCH_SIZE = 10;
+    constexpr int SNTP_SYNC_WAIT_MS = 5000;
+    constexpr std::time_t MIN_VALID_EPOCH = 1704067200; // 2024-01-01T00:00:00Z
 
     tervanix::identity::IdentityStore identity_store;
-    tervanix::registry::RegistryStore registry_store;
+    std::atomic_bool time_synced{false};
+    std::atomic_bool imu_ready{false};
+    char status_device_id[18]{};
+    char status_gateway_ip[16]{};
 
     esp_err_t initialize_nvs()
     {
-        auto r = nvs_flash_init();
-        if (r == ESP_ERR_NVS_NO_FREE_PAGES ||
-            r == ESP_ERR_NVS_NEW_VERSION_FOUND)
+        esp_err_t result = nvs_flash_init();
+        if (result == ESP_ERR_NVS_NO_FREE_PAGES ||
+            result == ESP_ERR_NVS_NEW_VERSION_FOUND)
         {
             ESP_ERROR_CHECK(nvs_flash_erase());
-            r = nvs_flash_init();
+            result = nvs_flash_init();
         }
-        return r;
+        return result;
     }
 
-#if TERVANIX_HAS_IMU
-    void get_device_id(char *out, size_t n)
+    void get_device_id(char *out, std::size_t out_size)
     {
         tervanix::identity::HardwareId id{};
         ESP_ERROR_CHECK(tervanix::identity::get_hardware_id(id));
-        tervanix::identity::format_device_id(id, out, n);
+        tervanix::identity::format_device_id(id, out, out_size);
     }
-#endif
-    void wait_registration()
+
+    void wait_for_registration()
     {
-        for (int ms = 0; !tervanix::ble::registered() && ms < 20000; ms += 200)
-            vTaskDelay(pdMS_TO_TICKS(200));
-        if (!tervanix::ble::registered() && !identity_store.has_uuid())
+        std::uint32_t wait_seconds = 0;
+        while (!tervanix::ble::registered())
+        {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            ++wait_seconds;
+            if (wait_seconds % 10 == 0)
+            {
+                ESP_LOGW(
+                    TAG,
+                    "Waiting for BLE registration before enabling Wi-Fi/MQTT "
+                    "(%us)",
+                    static_cast<unsigned>(wait_seconds));
+            }
+        }
+        ESP_LOGI(
+            TAG,
+            "BLE registration verified; enabling Wi-Fi telemetry transport");
+    }
+
+    esp_err_t sync_time(const char *ntp_server_ip)
+    {
+        if (ntp_server_ip == nullptr || ntp_server_ip[0] == '\0')
+        {
+            ESP_LOGE(TAG, "SNTP server IP is empty");
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        ESP_LOGI(
+            TAG,
+            "Synchronizing system time from Raspberry Pi SNTP server %s",
+            ntp_server_ip);
+
+        esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(ntp_server_ip);
+
+        const esp_err_t init_result = esp_netif_sntp_init(&config);
+        if (init_result != ESP_OK)
+        {
+            ESP_LOGE(
+                TAG,
+                "Failed to initialize SNTP against %s: %s",
+                ntp_server_ip,
+                esp_err_to_name(init_result));
+            return init_result;
+        }
+
+        unsigned attempt = 0;
+        while (tervanix::wifi::is_connected())
+        {
+            ++attempt;
+
+            const esp_err_t result =
+                esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_WAIT_MS));
+
+            const std::time_t now = std::time(nullptr);
+            if (result == ESP_OK && now >= MIN_VALID_EPOCH)
+            {
+                std::tm utc{};
+                gmtime_r(&now, &utc);
+
+                char timestamp[32]{};
+                std::strftime(
+                    timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+
+                ESP_LOGI(
+                    TAG,
+                    "System time synchronized from Raspberry Pi %s: %s",
+                    ntp_server_ip,
+                    timestamp);
+                time_synced.store(true);
+                return ESP_OK;
+            }
+
             ESP_LOGW(
-                TAG, "No registration UUID yet; relay remains operational");
+                TAG,
+                "Waiting for Raspberry Pi SNTP time from %s before MQTT "
+                "(attempt %u)",
+                ntp_server_ip,
+                attempt);
+        }
+
+        ESP_LOGE(
+            TAG, "Wi-Fi disconnected before SNTP synchronization completed");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    void sync_time()
+    esp_err_t wait_for_mqtt_connection()
     {
-        esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-        esp_netif_sntp_init(&c);
-        esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
+        unsigned wait_count = 0;
+
+        while (tervanix::wifi::is_connected())
+        {
+            if (tervanix::mqtt::is_connected())
+            {
+                ESP_LOGI(
+                    TAG,
+                    "MQTT connection established; telemetry transport ready");
+                return ESP_OK;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ++wait_count;
+
+            if (wait_count % 50 == 0)
+            {
+                ESP_LOGW(
+                    TAG, "Waiting for MQTT broker connection at Wi-Fi gateway");
+            }
+        }
+
+        ESP_LOGE(TAG, "Wi-Fi disconnected before MQTT connection completed");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    void on_peer(const tervanix::telemetry::PeerSample &p)
-    {
-        if (tervanix::mqtt::connected())
-            tervanix::mqtt::publish_peer_sample(p);
-    }
 #if TERVANIX_HAS_IMU
-    void sample_task(void *)
+    void sensor_task(void *)
     {
-        char id[18]{};
-        get_device_id(id, sizeof(id));
-        tervanix::telemetry::ImuSample batch[BATCH_SIZE]{};
-        int idx = 0;
-        std::uint32_t seq = 1;
+        char device_id[18]{};
+        get_device_id(device_id, sizeof(device_id));
+
+        tervanix::mqtt::TelemetrySample batch[MQTT_BATCH_SIZE]{};
+        int batch_count = 0;
+        std::uint32_t sequence = 1;
+
+        const TickType_t sample_period = pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
+        TickType_t wake_time = xTaskGetTickCount();
+
+        ESP_LOGI(
+            TAG,
+            "Publishing IMU as MQTT device_id=%s at %d Hz",
+            device_id,
+            SAMPLE_RATE_HZ);
+
         while (true)
         {
-            tervanix::telemetry::ImuSample s{};
-            if (tervanix::sensor::read_imu(s) == ESP_OK)
+            if (tervanix::mqtt::auth_rejected())
             {
-                batch[idx++] = s;
-                timeval tv{};
-                gettimeofday(&tv, nullptr);
-                tervanix::telemetry::PeerSample p{};
-                p.magic = tervanix::telemetry::PEER_MAGIC;
-                p.sequence = seq++;
-                p.ttl = 4;
-                std::memcpy(
-                    p.source_uuid,
-                    identity_store.uuid().data(),
-                    identity_store.uuid().size());
-                std::strncpy(p.device_id, id, sizeof(p.device_id) - 1);
-                p.timestamp_ms =
-                    (std::int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-                p.sample = s;
-                tervanix::peer::broadcast_sample(p);
-                if (idx == BATCH_SIZE)
+                ESP_LOGE(
+                    TAG,
+                    "MQTT bearer token rejected; rebooting into BLE "
+                    "registration mode");
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                esp_restart();
+            }
+
+            tervanix::sensor::ImuSample raw{};
+            if (tervanix::sensor::read_imu(raw) == ESP_OK)
+            {
+                batch[batch_count] = tervanix::mqtt::TelemetrySample{
+                    .imu = raw,
+                    .sequence = sequence++,
+                    .source_uptime_ms = esp_timer_get_time() / 1000LL,
+                };
+                ++batch_count;
+
+                if (batch_count == MQTT_BATCH_SIZE)
                 {
-                    tervanix::mqtt::publish_batch(batch, BATCH_SIZE, id);
-                    idx = 0;
+                    const esp_err_t result = tervanix::mqtt::publish_batch(
+                        batch, batch_count, device_id);
+
+                    if (result == ESP_OK)
+                    {
+                        batch_count = 0;
+                    } else if (result == ESP_ERR_INVALID_STATE)
+                    {
+                        // Preserve the current small batch while MQTT
+                        // reconnects. Sampling continues, but we do not grow an
+                        // unbounded queue.
+                    } else
+                    {
+                        ESP_LOGW(
+                            TAG,
+                            "MQTT batch publish failed: %s",
+                            esp_err_to_name(result));
+                        batch_count = 0;
+                    }
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ));
+
+            // If a full batch is waiting while MQTT is down, overwrite it with
+            // the newest samples rather than writing past the fixed-size
+            // buffer.
+            if (batch_count >= MQTT_BATCH_SIZE &&
+                !tervanix::mqtt::is_connected())
+            {
+                batch_count = 0;
+            }
+
+            vTaskDelayUntil(&wake_time, sample_period);
         }
     }
 #endif
+
     void status_task(void *)
     {
         while (true)
         {
+            const auto mqtt_stats = tervanix::mqtt::stats();
+
             ESP_LOGI(
                 TAG,
-                "BLE=%s registration=%s WiFi=%s MQTT=%s role=%s",
-                tervanix::ble::connected() ? "up" : "down",
-                tervanix::ble::registered() ? "ok" : "waiting",
-                tervanix::wifi::is_connected() ? "up" : "down",
-                tervanix::mqtt::connected() ? "up" : "down",
-                TERVANIX_IS_RELAY ? "relay" : "sensor");
-            vTaskDelay(pdMS_TO_TICKS(5000));
+                "BLE=%s registration=%s WiFi=%s TIME=%s MQTT=%s AUTH=%s "
+                "token=%s node_uuid=%s server_uuid=%s",
+                tervanix::ble::registered()
+                    ? "COMPLETE"
+                    : (tervanix::ble::connected() ? "CONNECTED"
+                                                  : "DISCONNECTED"),
+                tervanix::ble::registered() ? "REGISTERED" : "WAITING",
+                tervanix::wifi::is_connected() ? "CONNECTED" : "DISCONNECTED",
+                time_synced.load() ? "SYNCED" : "WAITING",
+                tervanix::mqtt::is_connected() ? "CONNECTED" : "DISCONNECTED",
+                tervanix::mqtt::auth_rejected()
+                    ? "REJECTED"
+                    : (tervanix::mqtt::auth_accepted() ? "ACCEPTED"
+                                                       : "WAITING"),
+                identity_store.has_bearer_token() ? "STORED" : "MISSING",
+                identity_store.has_uuid() ? "STORED" : "MISSING",
+                identity_store.has_server_uuid() ? "STORED" : "MISSING");
+
+            const tervanix::health::Snapshot snapshot{
+                .ble_connected = tervanix::ble::connected(),
+                .registered = tervanix::ble::registered(),
+                .wifi_connected = tervanix::wifi::is_connected(),
+                .time_synced = time_synced.load(),
+                .mqtt_connected = tervanix::mqtt::is_connected(),
+                .mqtt_auth_accepted = tervanix::mqtt::auth_accepted(),
+                .mqtt_auth_rejected = tervanix::mqtt::auth_rejected(),
+                .imu_ready = imu_ready.load(),
+                .device_id = status_device_id,
+                .gateway_ip = status_gateway_ip,
+                .published_batches = mqtt_stats.published_batches,
+                .published_samples = mqtt_stats.published_samples,
+                .publish_failures = mqtt_stats.publish_failures,
+                .last_publish_ms = mqtt_stats.last_publish_ms,
+            };
+            tervanix::health::render(snapshot, identity_store);
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
+
 } // namespace
 
 extern "C" void app_main()
 {
     ESP_ERROR_CHECK(initialize_nvs());
     ESP_ERROR_CHECK(identity_store.begin());
-    ESP_ERROR_CHECK(registry_store.begin());
-    ESP_LOGI(TAG, "Starting %s", TERVANIX_BOARD_NAME);
-    ESP_ERROR_CHECK(tervanix::ble::start_registration_client(identity_store));
 
-    xTaskCreate(status_task, "status", 3072, nullptr, 4, nullptr);
-    wait_registration();
+    esp_chip_info_t chip_info{};
+    esp_chip_info(&chip_info);
 
-    auto wr = tervanix::wifi::connect();
-    if (wr != ESP_OK)
-        ESP_LOGW(TAG, "No infrastructure Wi-Fi; peer relay remains active");
+    ESP_LOGI(TAG, "Tervanix BLE-registration + Wi-Fi/MQTT firmware starting");
+    ESP_LOGI(TAG, "Board: %s", TERVANIX_BOARD_NAME);
+    ESP_LOGI(TAG, "CPU cores: %d", chip_info.cores);
 
-    bool trusted = identity_store.has_uuid() &&
-                   identity_store.has_server_uuid() &&
-                   registry_store.contains(identity_store.uuid());
+    get_device_id(status_device_id, sizeof(status_device_id));
 
-    if (tervanix::wifi::is_connected())
+#if defined(TERVANIX_BOARD_NESSO_N1)
+    const esp_err_t display_result =
+        tervanix::health::initialize(identity_store);
+    if (display_result != ESP_OK)
     {
-        char gateway_ip[16]{};
-        tervanix::wifi::get_gateway_ip(gateway_ip, sizeof(gateway_ip));
-
-        trusted =
-            tervanix::registration::verify_over_wifi(
-                identity_store, registry_store, gateway_ip, 8765U) == ESP_OK;
-        if (!trusted)
-        {
-            ESP_LOGE(
-                TAG,
-                "Identity or registrar mismatch; node rejects Wi-Fi and peer "
-                "networking");
-            esp_wifi_disconnect();
-            return;
-        }
+        ESP_LOGW(
+            TAG,
+            "Nesso N1 health display unavailable: %s",
+            esp_err_to_name(display_result));
     }
+#endif
 
-    if (!trusted)
+    ESP_ERROR_CHECK(tervanix::ble::start_registration_client(identity_store));
+    xTaskCreate(status_task, "status", 3072, nullptr, 4, nullptr);
+
+    // BLE has one job: establish/verify the immutable node registration.
+    // No sensor sample is ever written to a BLE GATT characteristic.
+    wait_for_registration();
+
+    // BLE is only needed to register/verify the node. Stop and deinitialize
+    // NimBLE completely before bringing up the Wi-Fi telemetry transport.
+    ESP_ERROR_CHECK(tervanix::ble::stop_registration_client());
+
+    ESP_ERROR_CHECK(tervanix::wifi::connect());
+
+    char mqtt_broker_ip[16]{};
+    if (!tervanix::wifi::get_gateway_ip(mqtt_broker_ip, sizeof(mqtt_broker_ip)))
     {
         ESP_LOGE(
-            TAG,
-            "No previously verified registry snapshot; peer networking "
-            "disabled");
+            TAG, "Could not obtain MQTT broker IP from Wi-Fi default gateway");
         return;
     }
 
-    ESP_ERROR_CHECK(tervanix::peer::start(registry_store));
-    tervanix::peer::set_receive_handler(on_peer);
+    ESP_LOGI(TAG, "Using Wi-Fi gateway %s as MQTT broker", mqtt_broker_ip);
+    std::strncpy(
+        status_gateway_ip, mqtt_broker_ip, sizeof(status_gateway_ip) - 1);
 
-    if (tervanix::wifi::is_connected())
+    // Telemetry must never start with an unsynchronized wall clock.
+    ESP_ERROR_CHECK(sync_time(mqtt_broker_ip));
+
+    if (!identity_store.has_bearer_token())
     {
-        char gateway_ip[16]{};
-        tervanix::wifi::get_gateway_ip(gateway_ip, sizeof(gateway_ip));
-        sync_time();
-        auto mr = tervanix::mqtt::connect(gateway_ip, 1883U);
-        if (mr != ESP_OK)
-            ESP_LOGW(TAG, "MQTT unavailable; peer relay remains active");
+        ESP_LOGE(TAG, "Registration completed without an MQTT bearer token");
+        return;
     }
+
+    ESP_ERROR_CHECK(
+        tervanix::mqtt::connect(
+            mqtt_broker_ip, status_device_id, identity_store.bearer_token()));
+    ESP_ERROR_CHECK(wait_for_mqtt_connection());
+
 #if TERVANIX_HAS_IMU
     ESP_ERROR_CHECK(tervanix::sensor::initialize_imu());
-    xTaskCreate(sample_task, "sensor", 4096, nullptr, 5, nullptr);
+    imu_ready.store(true);
+    xTaskCreate(sensor_task, "sensor", 6144, nullptr, 5, nullptr);
 #else
-    ESP_LOGI(
-        TAG, "Networking-only ESP32 relay build: BMI270 and sampling excluded");
+    ESP_LOGI(TAG, "No IMU configured for this board; MQTT transport is idle");
 #endif
 }

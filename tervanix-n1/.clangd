@@ -20,6 +20,7 @@ Diagnostics:
     - constexpr_var_requires_const_init
     - undeclared_var_use
     - typename_nested_not_found
+    - expected
     - typecheck_cond_incompatible_operands
   
 Documentation:

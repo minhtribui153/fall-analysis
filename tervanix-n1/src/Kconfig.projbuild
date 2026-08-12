@@ -1,27 +1,16 @@
-# Placed alongside CMakeLists.txt so ESP-IDF picks it up as belonging
-# to the "main" (src) component. Reachable via:
-#   pio run -t menuconfig
-# or edit the resulting CONFIG_TERVANIX_* lines directly in
-# sdkconfig.nesso_n1 / sdkconfig.esp32_dev.
-
 menu "Tervanix Wi-Fi"
 
     config TERVANIX_WIFI_SSID
         string "Wi-Fi SSID"
         default ""
         help
-            Network the Nesso N1 connects to. Left blank by default so
-            nobody accidentally commits real credentials in a fresh
-            checkout -- wifi_manager.cpp refuses to start (logs an
-            error, returns ESP_ERR_INVALID_STATE) if this is empty.
+            Wi-Fi network used by the ESP32 to reach the MQTT broker.
+            BLE is not used for telemetry.
 
     config TERVANIX_WIFI_PASSWORD
         string "Wi-Fi password"
         default ""
         help
-            NOTE: this still lands in sdkconfig.nesso_n1, which is
-            tracked in git. If you don't want the real password in
-            history, gitignore your local sdkconfig.nesso_n1 and keep
-            a committed sdkconfig.nesso_n1.example with this blank.
+            Password for CONFIG_TERVANIX_WIFI_SSID.
 
 endmenu
