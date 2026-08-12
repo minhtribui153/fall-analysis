@@ -1,6 +1,7 @@
 #include "ble_advertiser.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -8,6 +9,7 @@
 #include "registration_protocol.hpp"
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 
 #include "host/ble_gap.h"
@@ -20,6 +22,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
+#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "os/os_mbuf.h"
@@ -69,6 +72,24 @@ namespace
         0xb2,
         0x7d);
 
+    const ble_uuid128_t credential_uuid = BLE_UUID128_INIT(
+        0x00,
+        0x00,
+        0x34,
+        0x12,
+        0xf8,
+        0x2c,
+        0x91,
+        0xa9,
+        0x8d,
+        0x4d,
+        0x8d,
+        0x6e,
+        0x02,
+        0x00,
+        0xb2,
+        0x7d);
+
     tervanix::identity::IdentityStore *identity_store = nullptr;
 
     std::array<std::uint8_t, 6> hardware_id{};
@@ -78,6 +99,7 @@ namespace
     std::uint16_t service_start_handle = 0;
     std::uint16_t service_end_handle = 0;
     std::uint16_t registration_value_handle = 0;
+    std::uint16_t credential_value_handle = 0;
 
     std::uint32_t pending_nonce = 0;
 
@@ -89,12 +111,16 @@ namespace
 
     bool pending_connect = false;
     ble_addr_t pending_address{};
+    std::atomic_bool host_task_stopped{true};
+    std::atomic_bool registration_retry_scheduled{false};
 
     int on_gap_event(ble_gap_event *event, void *argument);
 
     void start_scan();
     void begin_service_discovery();
     void send_registration_request();
+    void read_bearer_token();
+    void schedule_registration_retry();
 
     void reset_connection_state()
     {
@@ -102,6 +128,7 @@ namespace
         service_start_handle = 0;
         service_end_handle = 0;
         registration_value_handle = 0;
+        credential_value_handle = 0;
 
         is_connecting = false;
         is_connected = false;
@@ -234,6 +261,125 @@ namespace
         }
     }
 
+    void registration_retry_task(void *)
+    {
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        registration_retry_scheduled.store(false);
+
+        if (is_connected && !is_registered)
+        {
+            ESP_LOGI(tag, "Retrying BLE registration / approval check");
+            send_registration_request();
+        }
+
+        vTaskDelete(nullptr);
+    }
+
+    void schedule_registration_retry()
+    {
+        bool expected = false;
+        if (!registration_retry_scheduled.compare_exchange_strong(
+                expected, true))
+        {
+            return;
+        }
+
+        if (xTaskCreate(
+                registration_retry_task,
+                "ble-reg-retry",
+                3072,
+                nullptr,
+                4,
+                nullptr) != pdPASS)
+        {
+            registration_retry_scheduled.store(false);
+            ESP_LOGE(tag, "Could not create registration retry task");
+        }
+    }
+
+    int on_credential_read(
+        std::uint16_t callback_connection_handle,
+        const ble_gatt_error *error,
+        ble_gatt_attr *attribute,
+        void *argument)
+    {
+        (void)callback_connection_handle;
+        (void)argument;
+
+        if (error->status != 0)
+        {
+            ESP_LOGE(tag, "Bearer-token read failed: %d", error->status);
+            schedule_registration_retry();
+            return 0;
+        }
+
+        if (attribute == nullptr || attribute->om == nullptr)
+        {
+            ESP_LOGE(tag, "Bearer-token response is empty");
+            schedule_registration_retry();
+            return 0;
+        }
+
+        const std::uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+        if (length == 0 || length >= tervanix::identity::bearer_token_capacity)
+        {
+            ESP_LOGE(
+                tag,
+                "Invalid bearer-token length: %u",
+                static_cast<unsigned>(length));
+            schedule_registration_retry();
+            return 0;
+        }
+
+        char token[tervanix::identity::bearer_token_capacity]{};
+        const int copy_result =
+            os_mbuf_copydata(attribute->om, 0, length, token);
+        if (copy_result != 0)
+        {
+            ESP_LOGE(tag, "Could not copy bearer token: %d", copy_result);
+            schedule_registration_retry();
+            return 0;
+        }
+        token[length] = '\0';
+
+        const esp_err_t save_result = identity_store->save_bearer_token(token);
+        if (save_result != ESP_OK)
+        {
+            ESP_LOGE(
+                tag,
+                "Could not persist MQTT bearer token: %s",
+                esp_err_to_name(save_result));
+            schedule_registration_retry();
+            return 0;
+        }
+
+        is_registered = true;
+        ESP_LOGI(tag, "Registration approved; MQTT bearer token stored in NVS");
+        return 0;
+    }
+
+    void read_bearer_token()
+    {
+        if (credential_value_handle == 0 || connection_handle == invalid_handle)
+        {
+            ESP_LOGE(tag, "Bearer-token characteristic is unavailable");
+            schedule_registration_retry();
+            return;
+        }
+
+        ESP_LOGI(tag, "Reading approved MQTT bearer token");
+        const int result = ble_gattc_read(
+            connection_handle,
+            credential_value_handle,
+            on_credential_read,
+            nullptr);
+        if (result != 0)
+        {
+            ESP_LOGE(tag, "Bearer-token read start failed: %d", result);
+            schedule_registration_retry();
+        }
+    }
+
     int on_registration_read(
         std::uint16_t callback_connection_handle,
         const ble_gatt_error *error,
@@ -288,39 +434,52 @@ namespace
             response.status !=
                 tervanix::protocol::RegistrationStatus::NewUuidAssigned)
         {
-            ESP_LOGE(
-                tag,
-                "Registration rejected: %u",
-                static_cast<unsigned>(response.status));
+            if (response.status ==
+                tervanix::protocol::RegistrationStatus::ServerRejected)
+            {
+                ESP_LOGW(
+                    tag,
+                    "Registration is not approved yet; waiting for "
+                    "administrator decision");
+                identity_store->clear_bearer_token();
+                schedule_registration_retry();
+            } else
+            {
+                ESP_LOGE(
+                    tag,
+                    "Registration rejected: %u",
+                    static_cast<unsigned>(response.status));
+            }
             return 0;
         }
 
         tervanix::identity::NodeUuid assigned{};
+        tervanix::identity::NodeUuid registrar{};
 
         std::memcpy(assigned.data(), response.assigned_uuid, assigned.size());
+        std::memcpy(registrar.data(), response.server_uuid, registrar.size());
+
+        const esp_err_t save_server_result =
+            identity_store->save_server_uuid_once(registrar);
+        if (save_server_result != ESP_OK)
+        {
+            ESP_LOGE(
+                tag,
+                "Registration server UUID changed; refusing registration: %s",
+                esp_err_to_name(save_server_result));
+            return 0;
+        }
 
         const esp_err_t save_result = identity_store->save_uuid_once(assigned);
 
         if (save_result != ESP_OK)
         {
             ESP_LOGE(
-                tag, "Could not save UUID: %s", esp_err_to_name(save_result));
+                tag,
+                "Assigned node UUID conflicts with immutable NVS identity: %s",
+                esp_err_to_name(save_result));
             return 0;
         }
-
-        tervanix::identity::NodeUuid registrar{};
-        std::memcpy(registrar.data(), response.server_uuid, registrar.size());
-        const esp_err_t server_save =
-            identity_store->save_server_uuid_once(registrar);
-        if (server_save != ESP_OK)
-        {
-            ESP_LOGE(
-                tag, "Registrar UUID mismatch; node rejects BLE connection");
-            ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
-            return 0;
-        }
-
-        is_registered = true;
 
         const char *status_text =
             response.status ==
@@ -331,6 +490,12 @@ namespace
         ESP_LOGI(tag, "%s", status_text);
 
         print_uuid(assigned.data());
+
+        // The immutable registration response carries only UUID identity. MQTT
+        // authorization is provisioned through the separate read-only
+        // credential characteristic after administrator approval.
+        read_bearer_token();
+
         return 0;
     }
 
@@ -377,14 +542,17 @@ namespace
         if (identity_store->has_uuid())
         {
             request.flags |= tervanix::protocol::flag_has_uuid;
+
             std::memcpy(
                 request.current_uuid,
                 identity_store->uuid().data(),
                 identity_store->uuid().size());
         }
+
         if (identity_store->has_server_uuid())
         {
             request.flags |= tervanix::protocol::flag_has_server_uuid;
+
             std::memcpy(
                 request.expected_server_uuid,
                 identity_store->server_uuid().data(),
@@ -428,11 +596,18 @@ namespace
                 0)
             {
                 registration_value_handle = characteristic->val_handle;
-
                 ESP_LOGI(
                     tag,
                     "Registration characteristic handle=%u",
                     static_cast<unsigned>(registration_value_handle));
+            } else if (
+                ble_uuid_cmp(&characteristic->uuid.u, &credential_uuid.u) == 0)
+            {
+                credential_value_handle = characteristic->val_handle;
+                ESP_LOGI(
+                    tag,
+                    "Credential characteristic handle=%u",
+                    static_cast<unsigned>(credential_value_handle));
             }
 
             return 0;
@@ -440,9 +615,10 @@ namespace
 
         if (error->status == BLE_HS_EDONE)
         {
-            if (registration_value_handle == 0)
+            if (registration_value_handle == 0 || credential_value_handle == 0)
             {
-                ESP_LOGE(tag, "Registration characteristic not found");
+                ESP_LOGE(
+                    tag, "Registration/credential characteristic not found");
                 return 0;
             }
 
@@ -533,9 +709,9 @@ namespace
 
         ESP_LOGI(tag, "MTU=%u", static_cast<unsigned>(mtu));
 
-        if (mtu < 31)
+        if (mtu < 47)
         {
-            ESP_LOGE(tag, "MTU too small; need at least 31");
+            ESP_LOGE(tag, "MTU too small; need at least 47 for registration");
             return 0;
         }
 
@@ -609,7 +785,10 @@ namespace
             ESP_LOGW(tag, "Disconnected; reason=%d", event->disconnect.reason);
 
             reset_connection_state();
-            start_scan();
+            if (!is_registered)
+            {
+                start_scan();
+            }
             return 0;
 
         default:
@@ -677,14 +856,20 @@ namespace
             "NimBLE ready; address type=%u",
             static_cast<unsigned>(own_address_type));
 
-        start_scan();
+        if (!is_registered)
+        {
+            start_scan();
+        }
     }
 
     void host_task(void *)
     {
+        host_task_stopped.store(false);
         ESP_LOGI(tag, "NimBLE host task started");
 
         nimble_port_run();
+        host_task_stopped.store(true);
+        ESP_LOGI(tag, "NimBLE host task stopping");
         nimble_port_freertos_deinit();
     }
 
@@ -696,6 +881,8 @@ namespace tervanix::ble
     esp_err_t start_registration_client(identity::IdentityStore &store)
     {
         identity_store = &store;
+        is_registered = false;
+        registration_retry_scheduled.store(false);
 
         const esp_err_t mac_result =
             tervanix::identity::get_hardware_id(hardware_id);
@@ -707,7 +894,7 @@ namespace tervanix::ble
 
         ESP_LOGI(
             tag,
-            "Hardware ID=%02X:%02X:%02X:%02X:%02X:%02X",
+            "Device ID=%02X:%02X:%02X:%02X:%02X:%02X",
             hardware_id[0],
             hardware_id[1],
             hardware_id[2],
@@ -740,8 +927,93 @@ namespace tervanix::ble
         ble_hs_cfg.reset_cb = on_reset;
         ble_hs_cfg.sync_cb = on_sync;
 
+        host_task_stopped.store(false);
         nimble_port_freertos_init(host_task);
 
+        return ESP_OK;
+    }
+
+    esp_err_t stop_registration_client()
+    {
+        if (!is_registered)
+        {
+            ESP_LOGE(tag, "Refusing to stop BLE before registration completes");
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        // Disconnect cleanly first so BlueZ sees a normal GATT termination.
+        if (is_connected && connection_handle != invalid_handle)
+        {
+            ESP_LOGI(tag, "Registration complete; disconnecting BLE link");
+
+            const int terminate_result = ble_gap_terminate(
+                connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+
+            if (terminate_result != 0 && terminate_result != BLE_HS_ENOTCONN)
+            {
+                ESP_LOGW(
+                    tag,
+                    "ble_gap_terminate failed while stopping BLE: %d",
+                    terminate_result);
+            }
+
+            for (unsigned i = 0; i < 40 && is_connected; ++i)
+            {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+
+            if (is_connected)
+            {
+                ESP_LOGW(
+                    tag, "BLE disconnect did not complete before shutdown");
+            }
+        }
+
+        is_scanning = false;
+        is_connecting = false;
+        pending_connect = false;
+
+        ESP_LOGI(tag, "Stopping NimBLE host");
+        const int stop_result = nimble_port_stop();
+        if (stop_result != 0)
+        {
+            ESP_LOGE(tag, "nimble_port_stop failed: %d", stop_result);
+            return ESP_FAIL;
+        }
+
+        // host_task() performs nimble_port_freertos_deinit() after
+        // nimble_port_run() returns. Wait for that before deinitializing the
+        // port.
+        for (unsigned i = 0; i < 40 && !host_task_stopped.load(); ++i)
+        {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        if (!host_task_stopped.load())
+        {
+            ESP_LOGE(tag, "Timed out waiting for NimBLE host task to stop");
+            return ESP_ERR_TIMEOUT;
+        }
+
+        // nimble_port_freertos_deinit() runs at the tail of host_task(). Give
+        // the task scheduler one short window to finish deleting the host task
+        // before deinitializing the NimBLE port itself.
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        const esp_err_t deinit_result = nimble_port_deinit();
+        if (deinit_result != ESP_OK)
+        {
+            ESP_LOGE(
+                tag,
+                "nimble_port_deinit failed: %s",
+                esp_err_to_name(deinit_result));
+            return deinit_result;
+        }
+
+        host_ready = false;
+        reset_connection_state();
+
+        ESP_LOGI(tag, "BLE registration stack fully stopped");
         return ESP_OK;
     }
 

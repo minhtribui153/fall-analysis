@@ -199,16 +199,45 @@ namespace tervanix::registration
             return ESP_ERR_INVALID_RESPONSE;
 
         auto status = cJSON_GetObjectItemCaseSensitive(reg, "status");
+        auto reason = cJSON_GetObjectItemCaseSensitive(reg, "reason");
         auto node_json = cJSON_GetObjectItemCaseSensitive(reg, "node_uuid");
         auto server_json = cJSON_GetObjectItemCaseSensitive(reg, "server_uuid");
 
-        identity::NodeUuid received_node{}, received_server{};
+        if (!status || !cJSON_IsNumber(status))
+        {
+            cJSON_Delete(reg);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
 
-        bool valid = status && cJSON_IsNumber(status) &&
-                     (status->valueint == 1 || status->valueint == 2) &&
-                     cJSON_IsString(node_json) && cJSON_IsString(server_json) &&
-                     parse_uuid(node_json->valuestring, received_node) &&
-                     parse_uuid(server_json->valuestring, received_server);
+        const int status_value = status->valueint;
+        const char *reason_text =
+            cJSON_IsString(reason) ? reason->valuestring : "unspecified";
+
+        if (status_value == 5)
+        {
+            ESP_LOGW(
+                TAG, "Registration pending admin approval: %s", reason_text);
+            cJSON_Delete(reg);
+            return ESP_ERR_NOT_FINISHED;
+        }
+
+        if (status_value == 3 || status_value == 4 || status_value == 6)
+        {
+            ESP_LOGE(
+                TAG,
+                "Registration rejected status=%d reason=%s",
+                status_value,
+                reason_text);
+            cJSON_Delete(reg);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        identity::NodeUuid received_node{}, received_server{};
+        const bool valid =
+            (status_value == 1 || status_value == 2) &&
+            cJSON_IsString(node_json) && cJSON_IsString(server_json) &&
+            parse_uuid(node_json->valuestring, received_node) &&
+            parse_uuid(server_json->valuestring, received_server);
         cJSON_Delete(reg);
 
         if (!valid)
