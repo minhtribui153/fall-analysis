@@ -1,0 +1,2468 @@
+{
+  "dialect": "postgres",
+  "id": "4fb60bba-d19e-4cc8-922c-8c84ca9b7488",
+  "prevIds": [
+    "00000000-0000-0000-0000-000000000000"
+  ],
+  "version": "8",
+  "ddl": [
+    {
+      "name": "fall_detection",
+      "entityType": "schemas"
+    },
+    {
+      "name": "identification",
+      "entityType": "schemas"
+    },
+    {
+      "name": "monitoring",
+      "entityType": "schemas"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "activity_log",
+      "entityType": "tables",
+      "schema": "fall_detection"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "alerts",
+      "entityType": "tables",
+      "schema": "fall_detection"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "classification",
+      "entityType": "tables",
+      "schema": "fall_detection"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "devices",
+      "entityType": "tables",
+      "schema": "identification"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "registration_audit",
+      "entityType": "tables",
+      "schema": "identification"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "workers",
+      "entityType": "tables",
+      "schema": "identification"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "readings",
+      "entityType": "tables",
+      "schema": "monitoring"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "sessions",
+      "entityType": "tables",
+      "schema": "monitoring"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "node_registrations",
+      "entityType": "tables",
+      "schema": "public"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "registration_decision_audit",
+      "entityType": "tables",
+      "schema": "public"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "registration_schema_migrations",
+      "entityType": "tables",
+      "schema": "public"
+    },
+    {
+      "isRlsEnabled": false,
+      "name": "registration_server_identity",
+      "entityType": "tables",
+      "schema": "public"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "reading_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "audit_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "audit_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "serial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "alert_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "activity_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "devices"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "singleton",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "registration_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "bigserial",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "classification_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "version",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_schema_migrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ble_address",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "devices"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "checksum",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_schema_migrations"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "registration_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_uuid",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "server_uuid",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "classification_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "registration_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "applied_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_schema_migrations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "registered_at",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "devices"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "varchar(16)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_name",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "raised_at",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "device_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ts",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "active",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "last_seen_at",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "devices"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "node_uuid",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'pending'",
+      "generated": null,
+      "identity": null,
+      "name": "approval_status",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "bearer_token_hash",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'high'",
+      "generated": null,
+      "identity": null,
+      "name": "severity",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "worker_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ts",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "active",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "previous_status",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ts",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_issued_at",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "session_id",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "name": "acknowledged",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "varchar(20)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "event_type",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "varchar(20)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "activity_state",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "type": "varchar(12)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "acknowledged_by",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "previous_status",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "requested_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ax",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "new_status",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "fall_type",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_expires_at",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "max_smv",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "acknowledged_at",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "registered_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "actor",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "token_revoked_at",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "ay",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "new_status",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "actor",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "reason",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "last_seen_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "start_time",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "az",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "max_rotation",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "notes",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "freefall_duration",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "end_time",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "0",
+      "generated": null,
+      "identity": null,
+      "name": "gx",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "reason",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "decided_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "decided_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "decided_by",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "100",
+      "generated": null,
+      "identity": null,
+      "name": "sample_rate_hz",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "tilt_change",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "0",
+      "generated": null,
+      "identity": null,
+      "name": "gy",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "0",
+      "generated": null,
+      "identity": null,
+      "name": "gz",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "varchar(10)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "responsiveness",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_authenticated_at",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "decision_reason",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "smv",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "last_auth_failure_at",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "varchar(20)",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "activity_before_event",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "current_session_id",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "type": "real",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "gyro_magnitude",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "true",
+      "generated": null,
+      "identity": null,
+      "name": "active",
+      "entityType": "columns",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "name": "delinked_at",
+      "entityType": "columns",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_activity_session_ts",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_activity_worker_ts",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "raised_at"
+        }
+      ],
+      "isUnique": false,
+      "where": "(acknowledged = false)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_alerts_unacknowledged",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "event_type"
+        }
+      ],
+      "isUnique": false,
+      "where": "((event_type)::text <> 'NORMAL'::text)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_classification_events",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_classification_session_ts",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_classification_worker_ts",
+      "entityType": "indexes",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "registration_id"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "created_at"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_registration_audit_registration",
+      "entityType": "indexes",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "created_at"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_registration_audit_worker",
+      "entityType": "indexes",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": true,
+          "value": "lower((worker_name)::text)"
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "workers_name_unique_ci",
+      "entityType": "indexes",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "device_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_readings_device_ts",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "ts"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_readings_session_ts",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "device_id"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "start_time"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_sessions_device_time",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "token_expires_at"
+        }
+      ],
+      "isUnique": false,
+      "where": "(active = true)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_sessions_expiry",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "start_time"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_sessions_worker_time",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "device_id"
+        }
+      ],
+      "isUnique": true,
+      "where": "(active = true)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "one_active_session_per_device",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        }
+      ],
+      "isUnique": true,
+      "where": "(active = true)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "one_active_session_per_worker",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "sequence"
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "readings_session_sequence_unique",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "device_id"
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "sessions_session_device_unique",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "session_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "sessions_session_worker_unique",
+      "entityType": "indexes",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "approval_status"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "requested_at"
+        }
+      ],
+      "isUnique": false,
+      "where": "(active = true)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_node_registrations_status",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "worker_id"
+        },
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "active"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "idx_node_registrations_worker",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "device_id"
+        }
+      ],
+      "isUnique": true,
+      "where": "(active = true)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "one_active_registration_per_device",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        {
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null,
+          "isExpression": false,
+          "value": "registration_id"
+        },
+        {
+          "asc": false,
+          "nullsFirst": true,
+          "opclass": null,
+          "isExpression": false,
+          "value": "decided_at"
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "name": "registration_decision_audit_registration_idx",
+      "entityType": "indexes",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "current_session_id"
+      ],
+      "schemaTo": "monitoring",
+      "tableTo": "sessions",
+      "columnsTo": [
+        "session_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "node_registrations_current_session_fkey",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "device_id"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "devices",
+      "columnsTo": [
+        "device_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "name": "node_registrations_device_fkey",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "worker_id"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "workers",
+      "columnsTo": [
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "node_registrations_worker_fkey",
+      "entityType": "fks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "device_id"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "devices",
+      "columnsTo": [
+        "device_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "name": "sessions_device_fkey",
+      "entityType": "fks",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "worker_id"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "workers",
+      "columnsTo": [
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "name": "sessions_worker_fkey",
+      "entityType": "fks",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "registration_id"
+      ],
+      "schemaTo": "public",
+      "tableTo": "node_registrations",
+      "columnsTo": [
+        "registration_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "registration_audit_registration_fkey",
+      "entityType": "fks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "session_id"
+      ],
+      "schemaTo": "monitoring",
+      "tableTo": "sessions",
+      "columnsTo": [
+        "session_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "registration_audit_session_fkey",
+      "entityType": "fks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "worker_id"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "workers",
+      "columnsTo": [
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "registration_audit_worker_fkey",
+      "entityType": "fks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "session_id",
+        "device_id"
+      ],
+      "schemaTo": "monitoring",
+      "tableTo": "sessions",
+      "columnsTo": [
+        "session_id",
+        "device_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "readings_session_device_fkey",
+      "entityType": "fks",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "session_id",
+        "worker_id"
+      ],
+      "schemaTo": "monitoring",
+      "tableTo": "sessions",
+      "columnsTo": [
+        "session_id",
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "activity_log_session_worker_fkey",
+      "entityType": "fks",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "session_id",
+        "worker_id"
+      ],
+      "schemaTo": "monitoring",
+      "tableTo": "sessions",
+      "columnsTo": [
+        "session_id",
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "classification_session_worker_fkey",
+      "entityType": "fks",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "acknowledged_by"
+      ],
+      "schemaTo": "identification",
+      "tableTo": "workers",
+      "columnsTo": [
+        "worker_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "SET NULL",
+      "name": "alerts_acknowledged_by_worker_fkey",
+      "entityType": "fks",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "classification_id"
+      ],
+      "schemaTo": "fall_detection",
+      "tableTo": "classification",
+      "columnsTo": [
+        "classification_id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "name": "alerts_classification_fkey",
+      "entityType": "fks",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "columns": [
+        "singleton"
+      ],
+      "nameExplicit": true,
+      "name": "registration_server_identity_pkey",
+      "entityType": "pks",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "columns": [
+        "version"
+      ],
+      "nameExplicit": true,
+      "name": "registration_schema_migrations_pkey",
+      "entityType": "pks",
+      "schema": "public",
+      "table": "registration_schema_migrations"
+    },
+    {
+      "columns": [
+        "audit_id"
+      ],
+      "nameExplicit": true,
+      "name": "registration_decision_audit_pkey",
+      "entityType": "pks",
+      "schema": "public",
+      "table": "registration_decision_audit"
+    },
+    {
+      "columns": [
+        "worker_id"
+      ],
+      "nameExplicit": true,
+      "name": "workers_pkey",
+      "entityType": "pks",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "columns": [
+        "device_id"
+      ],
+      "nameExplicit": true,
+      "name": "devices_pkey",
+      "entityType": "pks",
+      "schema": "identification",
+      "table": "devices"
+    },
+    {
+      "columns": [
+        "registration_id"
+      ],
+      "nameExplicit": true,
+      "name": "node_registrations_pkey",
+      "entityType": "pks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "columns": [
+        "session_id"
+      ],
+      "nameExplicit": true,
+      "name": "sessions_pkey",
+      "entityType": "pks",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "columns": [
+        "audit_id"
+      ],
+      "nameExplicit": true,
+      "name": "registration_audit_pkey",
+      "entityType": "pks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "columns": [
+        "reading_id"
+      ],
+      "nameExplicit": true,
+      "name": "readings_pkey",
+      "entityType": "pks",
+      "schema": "monitoring",
+      "table": "readings"
+    },
+    {
+      "columns": [
+        "activity_id"
+      ],
+      "nameExplicit": true,
+      "name": "activity_log_pkey",
+      "entityType": "pks",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "columns": [
+        "classification_id"
+      ],
+      "nameExplicit": true,
+      "name": "classification_pkey",
+      "entityType": "pks",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "columns": [
+        "alert_id"
+      ],
+      "nameExplicit": true,
+      "name": "alerts_pkey",
+      "entityType": "pks",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "server_uuid"
+      ],
+      "nullsNotDistinct": false,
+      "name": "registration_server_identity_server_uuid_key",
+      "entityType": "uniques",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "nameExplicit": true,
+      "columns": [
+        "worker_uuid"
+      ],
+      "nullsNotDistinct": false,
+      "name": "workers_worker_uuid_key",
+      "entityType": "uniques",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "value": "singleton",
+      "name": "registration_server_identity_singleton_check",
+      "entityType": "checks",
+      "schema": "public",
+      "table": "registration_server_identity"
+    },
+    {
+      "value": "((worker_id)::text ~ '^[A-Z0-9]{8,12}$'::text)",
+      "name": "workers_worker_id_format_check",
+      "entityType": "checks",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "value": "((char_length((worker_name)::text) >= 1) AND (char_length((worker_name)::text) <= 16))",
+      "name": "workers_worker_name_length_check",
+      "entityType": "checks",
+      "schema": "identification",
+      "table": "workers"
+    },
+    {
+      "value": "((approval_status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[]))",
+      "name": "node_registrations_approval_status_check",
+      "entityType": "checks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "value": "(((active = true) AND (delinked_at IS NULL)) OR (active = false))",
+      "name": "node_registrations_delink_state_check",
+      "entityType": "checks",
+      "schema": "public",
+      "table": "node_registrations"
+    },
+    {
+      "value": "(((active = true) AND (end_time IS NULL) AND (token_revoked_at IS NULL)) OR (active = false))",
+      "name": "sessions_active_state_check",
+      "entityType": "checks",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "value": "(token_expires_at > token_issued_at)",
+      "name": "sessions_token_expiry_check",
+      "entityType": "checks",
+      "schema": "monitoring",
+      "table": "sessions"
+    },
+    {
+      "value": "((new_status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[]))",
+      "name": "registration_audit_new_status_check",
+      "entityType": "checks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "value": "((previous_status IS NULL) OR ((previous_status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[])))",
+      "name": "registration_audit_previous_status_check",
+      "entityType": "checks",
+      "schema": "identification",
+      "table": "registration_audit"
+    },
+    {
+      "value": "((activity_state)::text = ANY (ARRAY[('stationary'::character varying)::text, ('walking'::character varying)::text, ('running'::character varying)::text, ('jumping'::character varying)::text, ('unknown'::character varying)::text]))",
+      "name": "activity_log_activity_state_check",
+      "entityType": "checks",
+      "schema": "fall_detection",
+      "table": "activity_log"
+    },
+    {
+      "value": "((event_type)::text = ANY (ARRAY[('NORMAL'::character varying)::text, ('NEAR_MISS'::character varying)::text, ('FALL'::character varying)::text]))",
+      "name": "classification_event_type_check",
+      "entityType": "checks",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "value": "(((fall_type)::text = ANY (ARRAY[('FFH'::character varying)::text, ('STF'::character varying)::text])) OR (fall_type IS NULL))",
+      "name": "classification_fall_type_check",
+      "entityType": "checks",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "value": "(((responsiveness)::text = ANY (ARRAY[('still'::character varying)::text, ('active'::character varying)::text])) OR (responsiveness IS NULL))",
+      "name": "classification_responsiveness_check",
+      "entityType": "checks",
+      "schema": "fall_detection",
+      "table": "classification"
+    },
+    {
+      "value": "((severity)::text = ANY (ARRAY[('low'::character varying)::text, ('medium'::character varying)::text, ('high'::character varying)::text]))",
+      "name": "alerts_severity_check",
+      "entityType": "checks",
+      "schema": "fall_detection",
+      "table": "alerts"
+    },
+    {
+      "definition": "SELECT c.classification_id, c.ts, c.event_type, c.fall_type, c.max_smv, c.max_rotation, c.freefall_duration, c.tilt_change, c.responsiveness, c.activity_before_event, c.session_id, c.worker_id, w.worker_name, w.worker_uuid, s.device_id, d.ble_address, s.start_time AS session_start_time, s.end_time AS session_end_time, s.token_expires_at, a.severity, a.acknowledged, a.acknowledged_at FROM fall_detection.classification c JOIN identification.workers w ON c.worker_id::text = w.worker_id::text JOIN monitoring.sessions s ON c.session_id = s.session_id AND c.worker_id::text = s.worker_id::text JOIN identification.devices d ON s.device_id = d.device_id LEFT JOIN fall_detection.alerts a ON a.classification_id = c.classification_id WHERE c.event_type::text <> 'NORMAL'::text ORDER BY c.ts DESC",
+      "with": null,
+      "withNoData": null,
+      "using": null,
+      "tablespace": null,
+      "materialized": false,
+      "name": "v_events_detail",
+      "entityType": "views",
+      "schema": "fall_detection"
+    }
+  ],
+  "renames": []
+}
