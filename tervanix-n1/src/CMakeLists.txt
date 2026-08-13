@@ -6,6 +6,8 @@ set(TERVANIX_SRCS
     "wifi_manager.cpp"
     "mqtt_publisher.cpp"
     "health_display.cpp"
+    "model_manager.cpp"
+    "har_inference.cpp"
     "nesso_board_io.cpp"
     "imu/imu_sensor.cpp"
 )
@@ -24,6 +26,8 @@ set(TERVANIX_REQUIRES
     driver
     esp_driver_i2c
     esp_lcd
+    esp_http_client
+    esp-tflite-micro
 )
 
 idf_component_register(

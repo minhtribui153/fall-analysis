@@ -1,284 +1,417 @@
 #include "mqtt_publisher.hpp"
-
-#include <atomic>
-#include <cstdint>
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <sys/time.h>
-
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "har_inference.hpp"
 #include "mbedtls/base64.h"
 #include "mbedtls/gcm.h"
 #include "mbedtls/sha256.h"
 #include "mqtt_client.h"
 
-namespace {
-	constexpr char TAG[] = "mqtt";
-	constexpr std::size_t BROKER_URI_CAPACITY = 64;
-	constexpr std::size_t TOPIC_CAPACITY = 128;
-	constexpr std::size_t DEVICE_ID_CAPACITY = 18;
-	constexpr std::size_t WORKER_ID_CAPACITY = 13;
-	constexpr std::size_t TOKEN_CAPACITY = 64;
-	constexpr std::size_t SESSION_TEXT_CAPACITY = 37;
+#include <atomic>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <sys/time.h>
 
-	esp_mqtt_client_handle_t client = nullptr;
-	std::atomic_bool connected{false};
-	std::atomic_bool rejected{false};
-	std::atomic_bool accepted{false};
-	std::atomic<std::uint64_t> published_batches{0};
-	std::atomic<std::uint64_t> published_samples{0};
-	std::atomic<std::uint64_t> publish_failures{0};
-	std::atomic<std::int64_t> last_publish_ms{0};
-	char broker_uri[BROKER_URI_CAPACITY]{};
-	char mqtt_device_id[DEVICE_ID_CAPACITY]{};
-	char mqtt_worker_id[WORKER_ID_CAPACITY]{};
-	char mqtt_session_id[SESSION_TEXT_CAPACITY]{};
-	char mqtt_bearer_token[TOKEN_CAPACITY]{};
-	char telemetry_topic[TOPIC_CAPACITY]{};
-	char auth_status_topic[TOPIC_CAPACITY]{};
-
-	void uuid_to_text(const tervanix::identity::SessionUuid& value, char* out, std::size_t out_size)
-	{
-		std::snprintf(
-			out, out_size,
-			"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-			value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
-			value[8], value[9], value[10], value[11], value[12], value[13], value[14], value[15]
-		);
-	}
-
-	bool build_session_topic(const char* suffix, char* out, std::size_t out_size)
-	{
-		char compact[33]{};
-		std::size_t n = 0;
-		for (const char* p = mqtt_session_id; *p; ++p) {
-			if (*p != '-') compact[n++] = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
-		}
-		compact[n] = '\0';
-		const int written = std::snprintf(out, out_size, "tervanix/sessions/%s/%s", compact, suffix);
-		return written > 0 && static_cast<std::size_t>(written) < out_size;
-	}
-
-	bool base64_encode(const std::uint8_t* input, std::size_t input_len, char*& output)
-	{
-		std::size_t required = 0;
-		mbedtls_base64_encode(nullptr, 0, &required, input, input_len);
-		output = static_cast<char*>(std::malloc(required + 1));
-		if (!output) return false;
-		std::size_t written = 0;
-		if (mbedtls_base64_encode(
-				reinterpret_cast<unsigned char*>(output), required + 1, &written, input, input_len) != 0) {
-			std::free(output); output = nullptr; return false;
-		}
-		output[written] = '\0';
-		return true;
-	}
-
-	void derive_aes_key(std::uint8_t key[32])
-	{
-		mbedtls_sha256_context ctx;
-		mbedtls_sha256_init(&ctx);
-		mbedtls_sha256_starts(&ctx, 0);
-		mbedtls_sha256_update(
-			&ctx,
-			reinterpret_cast<const unsigned char*>(mqtt_bearer_token),
-			std::strlen(mqtt_bearer_token)
-		);
-		mbedtls_sha256_finish(&ctx, key);
-		mbedtls_sha256_free(&ctx);
-	}
-
-	void handle_auth_status(const esp_mqtt_event_handle_t event)
-	{
-		if (!event || !event->topic || !event->data || event->topic_len <= 0 || event->data_len <= 0) return;
-		const std::size_t expected_len = std::strlen(auth_status_topic);
-		if (static_cast<std::size_t>(event->topic_len) != expected_len ||
-			std::memcmp(event->topic, auth_status_topic, expected_len) != 0) return;
-
-		cJSON* root = cJSON_ParseWithLength(event->data, event->data_len);
-		if (!root) return;
-		const cJSON* status = cJSON_GetObjectItemCaseSensitive(root, "status");
-		const cJSON* reason = cJSON_GetObjectItemCaseSensitive(root, "reason");
-		if (cJSON_IsString(status) && status->valuestring) {
-			if (std::strcmp(status->valuestring, "rejected") == 0) {
-				rejected.store(true); accepted.store(false);
-				ESP_LOGE(TAG, "Encrypted telemetry rejected%s%s",
-						cJSON_IsString(reason) && reason->valuestring ? ": " : "",
-						cJSON_IsString(reason) && reason->valuestring ? reason->valuestring : "");
-			} else if (std::strcmp(status->valuestring, "accepted") == 0) {
-				accepted.store(true); rejected.store(false);
-				ESP_LOGI(TAG, "Encrypted telemetry session accepted");
-			}
-		}
-		cJSON_Delete(root);
-	}
-
-	void on_mqtt_event(void*, esp_event_base_t, std::int32_t event_id, void* event_data)
-	{
-		auto* event = static_cast<esp_mqtt_event_handle_t>(event_data);
-		switch (event_id) {
-			case MQTT_EVENT_CONNECTED: {
-				connected.store(true);
-				ESP_LOGI(TAG, "Connected to %s session=%s worker=%s", broker_uri, mqtt_session_id, mqtt_worker_id);
-				const int mid = esp_mqtt_client_subscribe(client, auth_status_topic, 1);
-				if (mid >= 0) ESP_LOGI(TAG, "Subscribed to %s", auth_status_topic);
-				break;
-			}
-			case MQTT_EVENT_DISCONNECTED:
-				connected.store(false);
-				ESP_LOGW(TAG, "Disconnected; MQTT client will reconnect");
-				break;
-			case MQTT_EVENT_DATA:
-				handle_auth_status(event);
-				break;
-			case MQTT_EVENT_ERROR:
-				connected.store(false);
-				ESP_LOGE(TAG, "MQTT error event");
-				break;
-			default: break;
-		}
-	}
-}  // namespace
-
-namespace tervanix::mqtt {
-
-	esp_err_t connect(
-		const char* broker_ip,
-		const char* device_id,
-		const char* worker_id,
-		const identity::SessionUuid& session_id,
-		const char* bearer_token)
-	{
-		if (!broker_ip || !*broker_ip || !device_id || !*device_id || !worker_id || !*worker_id || !bearer_token || !*bearer_token)
-			return ESP_ERR_INVALID_ARG;
-		if (client) return ESP_OK;
-		if (std::strlen(device_id) >= sizeof(mqtt_device_id) ||
-			std::strlen(worker_id) >= sizeof(mqtt_worker_id) ||
-			std::strlen(bearer_token) >= sizeof(mqtt_bearer_token)) return ESP_ERR_INVALID_SIZE;
-
-		std::strcpy(mqtt_device_id, device_id);
-		std::strcpy(mqtt_worker_id, worker_id);
-		std::strcpy(mqtt_bearer_token, bearer_token);
-		uuid_to_text(session_id, mqtt_session_id, sizeof(mqtt_session_id));
-		if (!build_session_topic("telemetry", telemetry_topic, sizeof(telemetry_topic)) ||
-			!build_session_topic("auth/status", auth_status_topic, sizeof(auth_status_topic))) return ESP_ERR_INVALID_ARG;
-
-		if (std::snprintf(broker_uri, sizeof(broker_uri), "mqtt://%s", broker_ip) <= 0) return ESP_ERR_INVALID_ARG;
-
-		esp_mqtt_client_config_t config{};
-		config.broker.address.uri = broker_uri;
-		
-		// Do not transmit the bearer token as an MQTT password over plaintext TCP.
-		// The session UUID is non-secret routing metadata; confidentiality/integrity
-		// comes from AES-256-GCM on each telemetry envelope.
-		config.credentials.username = mqtt_session_id;
-
-		client = esp_mqtt_client_init(&config);
-		if (!client) return ESP_FAIL;
-		esp_err_t rc = esp_mqtt_client_register_event(
-			client, static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID), on_mqtt_event, nullptr);
-		if (rc != ESP_OK) { esp_mqtt_client_destroy(client); client = nullptr; return rc; }
-		rc = esp_mqtt_client_start(client);
-		if (rc != ESP_OK) { esp_mqtt_client_destroy(client); client = nullptr; return rc; }
-		ESP_LOGI(TAG, "MQTT started; broker=%s; AES-256-GCM payload encryption enabled", broker_uri);
-		return ESP_OK;
-	}
-
-	bool is_connected() { return connected.load(); }
-	bool auth_rejected() { return rejected.load(); }
-	bool auth_accepted() { return accepted.load(); }
-	Stats stats() { return {published_batches.load(), published_samples.load(), publish_failures.load(), last_publish_ms.load()}; }
-
-	esp_err_t publish_batch(const TelemetrySample* samples, int count)
-	{
-		if (!samples || count <= 0) return ESP_ERR_INVALID_ARG;
-		if (!client || !connected.load() || rejected.load()) return ESP_ERR_INVALID_STATE;
-
-		timeval now{}; gettimeofday(&now, nullptr);
-		const std::int64_t wall_now_ms = static_cast<std::int64_t>(now.tv_sec) * 1000LL + now.tv_usec / 1000LL;
-		const std::int64_t uptime_now_ms = esp_timer_get_time() / 1000LL;
-
-		cJSON* plain = cJSON_CreateObject();
-		cJSON* readings = cJSON_CreateArray();
-		if (!plain || !readings) { cJSON_Delete(plain); cJSON_Delete(readings); return ESP_ERR_NO_MEM; }
-		cJSON_AddStringToObject(plain, "session_id", mqtt_session_id);
-		cJSON_AddStringToObject(plain, "worker_id", mqtt_worker_id);
-		cJSON_AddStringToObject(plain, "device_id", mqtt_device_id);
-		cJSON_AddItemToObject(plain, "readings", readings);
-		for (int i = 0; i < count; ++i) {
-			const auto& sample = samples[i];
-			const std::int64_t sample_epoch_ms = wall_now_ms - (uptime_now_ms - sample.source_uptime_ms);
-			cJSON* r = cJSON_CreateObject();
-			if (!r) { cJSON_Delete(plain); return ESP_ERR_NO_MEM; }
-			cJSON_AddNumberToObject(r, "sequence", sample.sequence);
-			cJSON_AddNumberToObject(r, "source_uptime_ms", static_cast<double>(sample.source_uptime_ms));
-			cJSON_AddNumberToObject(r, "ts", static_cast<double>(sample_epoch_ms));
-			cJSON_AddNumberToObject(r, "ax", sample.imu.ax); cJSON_AddNumberToObject(r, "ay", sample.imu.ay);
-			cJSON_AddNumberToObject(r, "az", sample.imu.az); cJSON_AddNumberToObject(r, "gx", sample.imu.gx);
-			cJSON_AddNumberToObject(r, "gy", sample.imu.gy); cJSON_AddNumberToObject(r, "gz", sample.imu.gz);
-			cJSON_AddItemToArray(readings, r);
-		}
-		char* plaintext = cJSON_PrintUnformatted(plain);
-		cJSON_Delete(plain);
-		if (!plaintext) return ESP_ERR_NO_MEM;
-		const std::size_t plaintext_len = std::strlen(plaintext);
-
-		std::uint8_t key[32]{}; derive_aes_key(key);
-		std::uint8_t nonce[12]{}; esp_fill_random(nonce, sizeof(nonce));
-		std::uint8_t tag[16]{};
-		auto* ciphertext = static_cast<std::uint8_t*>(std::malloc(plaintext_len));
-		if (!ciphertext) { cJSON_free(plaintext); return ESP_ERR_NO_MEM; }
-
-		char aad[96]{};
-		const int aad_len = std::snprintf(aad, sizeof(aad), "tervanix|v2|%s|%s", mqtt_session_id, mqtt_worker_id);
-		mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
-		int crypto_rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
-		if (crypto_rc == 0) {
-			crypto_rc = mbedtls_gcm_crypt_and_tag(
-				&gcm, MBEDTLS_GCM_ENCRYPT, plaintext_len,
-				nonce, sizeof(nonce), reinterpret_cast<const unsigned char*>(aad), aad_len,
-				reinterpret_cast<const unsigned char*>(plaintext), ciphertext,
-				sizeof(tag), tag
-			);
-		}
-		mbedtls_gcm_free(&gcm);
-		std::memset(key, 0, sizeof(key));
-		cJSON_free(plaintext);
-		if (crypto_rc != 0) { std::free(ciphertext); publish_failures.fetch_add(1); return ESP_FAIL; }
-
-		char *nonce_b64=nullptr, *cipher_b64=nullptr, *tag_b64=nullptr;
-		if (!base64_encode(nonce, sizeof(nonce), nonce_b64) ||
-			!base64_encode(ciphertext, plaintext_len, cipher_b64) ||
-			!base64_encode(tag, sizeof(tag), tag_b64)) {
-			std::free(ciphertext); std::free(nonce_b64); std::free(cipher_b64); std::free(tag_b64);
-			return ESP_ERR_NO_MEM;
-		}
-		std::free(ciphertext);
-
-		cJSON* envelope = cJSON_CreateObject();
-		cJSON_AddNumberToObject(envelope, "schema_version", 2);
-		cJSON_AddStringToObject(envelope, "alg", "A256GCM");
-		cJSON_AddStringToObject(envelope, "session_id", mqtt_session_id);
-		cJSON_AddStringToObject(envelope, "worker_id", mqtt_worker_id);
-		cJSON_AddStringToObject(envelope, "nonce", nonce_b64);
-		cJSON_AddStringToObject(envelope, "ciphertext", cipher_b64);
-		cJSON_AddStringToObject(envelope, "tag", tag_b64);
-		std::free(nonce_b64); std::free(cipher_b64); std::free(tag_b64);
-		char* payload = cJSON_PrintUnformatted(envelope);
-		cJSON_Delete(envelope);
-		if (!payload) return ESP_ERR_NO_MEM;
-
-		const int mid = esp_mqtt_client_publish(client, telemetry_topic, payload, 0, 1, 0);
-		cJSON_free(payload);
-		if (mid < 0) { publish_failures.fetch_add(1); return ESP_FAIL; }
-		published_batches.fetch_add(1);
-		published_samples.fetch_add(static_cast<std::uint64_t>(count));
-		last_publish_ms.store(esp_timer_get_time() / 1000LL);
-		return ESP_OK;
-	}
-}  // namespace tervanix::mqtt
+namespace
+{
+    constexpr char TAG[] = "mqtt";
+    constexpr std::size_t URI = 64, TOP = 128, DEV = 18, WID = 13, TOK = 64,
+                          SID = 37;
+    esp_mqtt_client_handle_t client = nullptr;
+    std::atomic_bool connected{false}, rejected{false}, accepted{false};
+    std::atomic<std::uint64_t> batches{0}, samples{0}, states{0}, fails{0};
+    std::atomic<std::int64_t> lastpub{0};
+    char uri[URI]{}, device[DEV]{}, worker[WID]{}, session[SID]{}, token[TOK]{},
+        telemetry[TOP]{}, state_topic[TOP]{}, auth_topic[TOP]{};
+    void uuid_text(
+        const tervanix::identity::SessionUuid &v,
+        char *out,
+        std::size_t n)
+    {
+        std::snprintf(
+            out,
+            n,
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%"
+            "02x",
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            v[4],
+            v[5],
+            v[6],
+            v[7],
+            v[8],
+            v[9],
+            v[10],
+            v[11],
+            v[12],
+            v[13],
+            v[14],
+            v[15]);
+    }
+    bool topic(const char *suffix, char *out, std::size_t n)
+    {
+        char compact[33]{};
+        std::size_t j = 0;
+        for (const char *p = session; *p; ++p)
+            if (*p != '-')
+                compact[j++] = std::toupper((unsigned char)*p);
+        int w =
+            std::snprintf(out, n, "tervanix/sessions/%s/%s", compact, suffix);
+        return w > 0 && (std::size_t)w < n;
+    }
+    bool b64(const std::uint8_t *in, std::size_t len, char *&out)
+    {
+        std::size_t req = 0;
+        mbedtls_base64_encode(nullptr, 0, &req, in, len);
+        out = (char *)std::malloc(req + 1);
+        if (!out)
+            return false;
+        std::size_t w = 0;
+        if (mbedtls_base64_encode((unsigned char *)out, req + 1, &w, in, len) !=
+            0)
+        {
+            std::free(out);
+            out = nullptr;
+            return false;
+        }
+        out[w] = 0;
+        return true;
+    }
+    void key(std::uint8_t out[32])
+    {
+        mbedtls_sha256_context c{};
+        mbedtls_sha256_init(&c);
+        mbedtls_sha256_starts(&c, 0);
+        mbedtls_sha256_update(
+            &c, (const unsigned char *)token, std::strlen(token));
+        mbedtls_sha256_finish(&c, out);
+        mbedtls_sha256_free(&c);
+    }
+    std::int64_t epoch(std::int64_t up)
+    {
+        timeval now{};
+        gettimeofday(&now, nullptr);
+        std::int64_t wall =
+                         (std::int64_t)now.tv_sec * 1000 + now.tv_usec / 1000,
+                     cur = esp_timer_get_time() / 1000;
+        return wall - (cur - up);
+    }
+    cJSON *pred_json(const tervanix::har::Prediction &p)
+    {
+        cJSON *o = cJSON_CreateObject();
+        if (!o)
+            return nullptr;
+        cJSON_AddNumberToObject(
+            o, "prediction_sequence", (double)p.prediction_sequence);
+        cJSON_AddNumberToObject(
+            o, "source_uptime_ms", (double)p.source_uptime_ms);
+        cJSON_AddNumberToObject(o, "ts", (double)epoch(p.source_uptime_ms));
+        cJSON_AddStringToObject(o, "state", p.state);
+        cJSON_AddNumberToObject(o, "confidence", p.confidence);
+        cJSON_AddStringToObject(o, "model_sha256", p.model_sha256);
+        cJSON_AddStringToObject(o, "source", "nesso_tflite");
+        return o;
+    }
+    esp_err_t encrypt_publish(
+        const char *top,
+        const char *type,
+        cJSON *root,
+        int qos,
+        bool retain)
+    {
+        if (!root)
+            return ESP_ERR_INVALID_ARG;
+        if (!client || !connected.load() || rejected.load())
+        {
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_STATE;
+        }
+        char *plain = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (!plain)
+            return ESP_ERR_NO_MEM;
+        std::size_t plen = std::strlen(plain);
+        std::uint8_t k[32]{};
+        key(k);
+        std::uint8_t nonce[12]{}, tag[16]{};
+        esp_fill_random(nonce, sizeof(nonce));
+        auto *ct = (std::uint8_t *)std::malloc(plen);
+        if (!ct)
+        {
+            std::memset(k, 0, sizeof(k));
+            cJSON_free(plain);
+            return ESP_ERR_NO_MEM;
+        }
+        char aad[128]{};
+        int alen = std::snprintf(
+            aad, sizeof(aad), "tervanix|v2|%s|%s|%s", session, worker, type);
+        mbedtls_gcm_context g{};
+        mbedtls_gcm_init(&g);
+        int rc = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, k, 256);
+        if (rc == 0)
+            rc = mbedtls_gcm_crypt_and_tag(
+                &g,
+                MBEDTLS_GCM_ENCRYPT,
+                plen,
+                nonce,
+                sizeof(nonce),
+                (const unsigned char *)aad,
+                alen,
+                (const unsigned char *)plain,
+                ct,
+                sizeof(tag),
+                tag);
+        mbedtls_gcm_free(&g);
+        std::memset(k, 0, sizeof(k));
+        cJSON_free(plain);
+        if (rc != 0)
+        {
+            std::free(ct);
+            fails++;
+            return ESP_FAIL;
+        }
+        char *nb = nullptr, *cb = nullptr, *tb = nullptr;
+        bool ok = b64(nonce, sizeof(nonce), nb) && b64(ct, plen, cb) &&
+                  b64(tag, sizeof(tag), tb);
+        std::free(ct);
+        if (!ok)
+        {
+            std::free(nb);
+            std::free(cb);
+            std::free(tb);
+            fails++;
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "schema_version", 2);
+        cJSON_AddStringToObject(e, "alg", "A256GCM");
+        cJSON_AddStringToObject(e, "message_type", type);
+        cJSON_AddStringToObject(e, "session_id", session);
+        cJSON_AddStringToObject(e, "worker_id", worker);
+        cJSON_AddStringToObject(e, "nonce", nb);
+        cJSON_AddStringToObject(e, "ciphertext", cb);
+        cJSON_AddStringToObject(e, "tag", tb);
+        std::free(nb);
+        std::free(cb);
+        std::free(tb);
+        char *payload = cJSON_PrintUnformatted(e);
+        cJSON_Delete(e);
+        if (!payload)
+            return ESP_ERR_NO_MEM;
+        int mid = esp_mqtt_client_publish(
+            client, top, payload, 0, qos, retain ? 1 : 0);
+        cJSON_free(payload);
+        if (mid < 0)
+        {
+            fails++;
+            return ESP_FAIL;
+        }
+        lastpub = esp_timer_get_time() / 1000;
+        return ESP_OK;
+    }
+    void auth(const esp_mqtt_event_handle_t ev)
+    {
+        if (!ev || !ev->topic || !ev->data)
+            return;
+        std::size_t n = std::strlen(auth_topic);
+        if ((std::size_t)ev->topic_len != n ||
+            std::memcmp(ev->topic, auth_topic, n) != 0)
+            return;
+        cJSON *r = cJSON_ParseWithLength(ev->data, ev->data_len);
+        if (!r)
+            return;
+        auto *s = cJSON_GetObjectItemCaseSensitive(r, "status");
+        auto *reason = cJSON_GetObjectItemCaseSensitive(r, "reason");
+        if (cJSON_IsString(s) && s->valuestring)
+        {
+            if (std::strcmp(s->valuestring, "rejected") == 0)
+            {
+                rejected = true;
+                accepted = false;
+                ESP_LOGE(
+                    TAG,
+                    "session rejected%s%s",
+                    cJSON_IsString(reason) && reason->valuestring ? ": " : "",
+                    cJSON_IsString(reason) && reason->valuestring
+                        ? reason->valuestring
+                        : "");
+            } else if (std::strcmp(s->valuestring, "accepted") == 0)
+            {
+                accepted = true;
+                rejected = false;
+            }
+        }
+        cJSON_Delete(r);
+    }
+    void event(void *, esp_event_base_t, std::int32_t id, void *data)
+    {
+        auto *ev = (esp_mqtt_event_handle_t)data;
+        switch (id)
+        {
+        case MQTT_EVENT_CONNECTED:
+            connected = true;
+            esp_mqtt_client_subscribe(client, auth_topic, 1);
+            ESP_LOGI(TAG, "connected session=%s worker=%s", session, worker);
+            break;
+        case MQTT_EVENT_DISCONNECTED:
+            connected = false;
+            break;
+        case MQTT_EVENT_DATA:
+            auth(ev);
+            break;
+        case MQTT_EVENT_ERROR:
+            connected = false;
+            break;
+        default:
+            break;
+        }
+    }
+} // namespace
+namespace tervanix::mqtt
+{
+    esp_err_t connect(
+        const char *ip,
+        const char *dev,
+        const char *wid,
+        const identity::SessionUuid &sid,
+        const char *bearer)
+    {
+        if (!ip || !*ip || !dev || !*dev || !wid || !*wid || !bearer ||
+            !*bearer)
+            return ESP_ERR_INVALID_ARG;
+        if (client)
+            return ESP_OK;
+        if (std::strlen(dev) >= sizeof(device) ||
+            std::strlen(wid) >= sizeof(worker) ||
+            std::strlen(bearer) >= sizeof(token))
+            return ESP_ERR_INVALID_SIZE;
+        std::strcpy(device, dev);
+        std::strcpy(worker, wid);
+        std::strcpy(token, bearer);
+        uuid_text(sid, session, sizeof(session));
+        if (!topic("telemetry", telemetry, sizeof(telemetry)) ||
+            !topic("state", state_topic, sizeof(state_topic)) ||
+            !topic("auth/status", auth_topic, sizeof(auth_topic)))
+            return ESP_ERR_INVALID_SIZE;
+        int w = std::snprintf(uri, sizeof(uri), "mqtt://%s", ip);
+        if (w <= 0 || (std::size_t)w >= sizeof(uri))
+            return ESP_ERR_INVALID_SIZE;
+        esp_mqtt_client_config_t cfg{};
+        cfg.broker.address.uri = uri;
+        cfg.credentials.username = session;
+        client = esp_mqtt_client_init(&cfg);
+        if (!client)
+            return ESP_FAIL;
+        esp_err_t rc = esp_mqtt_client_register_event(
+            client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, event, nullptr);
+        if (rc == ESP_OK)
+            rc = esp_mqtt_client_start(client);
+        if (rc != ESP_OK)
+        {
+            esp_mqtt_client_destroy(client);
+            client = nullptr;
+            return rc;
+        }
+        ESP_LOGI(
+            TAG, "MQTT started telemetry=%s state=%s", telemetry, state_topic);
+        return ESP_OK;
+    }
+    bool is_connected() { return connected.load(); }
+    bool auth_rejected() { return rejected.load(); }
+    bool auth_accepted() { return accepted.load(); }
+    Stats stats()
+    {
+        Stats result{};
+        result.published_batches = batches.load();
+        result.published_samples = samples.load();
+        result.published_states = states.load();
+        result.publish_failures = fails.load();
+        result.last_publish_ms = lastpub.load();
+        return result;
+    }
+    esp_err_t publish_batch(
+        const TelemetrySample *ss,
+        int count,
+        const har::Prediction *p)
+    {
+        if (!ss || count <= 0)
+            return ESP_ERR_INVALID_ARG;
+        cJSON *root = cJSON_CreateObject();
+        cJSON *arr = cJSON_CreateArray();
+        if (!root || !arr)
+        {
+            cJSON_Delete(root);
+            cJSON_Delete(arr);
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON_AddStringToObject(root, "session_id", session);
+        cJSON_AddStringToObject(root, "worker_id", worker);
+        cJSON_AddStringToObject(root, "device_id", device);
+        cJSON_AddItemToObject(root, "readings", arr);
+        for (int i = 0; i < count; ++i)
+        {
+            cJSON *r = cJSON_CreateObject();
+            if (!r)
+            {
+                cJSON_Delete(root);
+                return ESP_ERR_NO_MEM;
+            }
+            cJSON_AddNumberToObject(r, "sequence", ss[i].sequence);
+            cJSON_AddNumberToObject(
+                r, "source_uptime_ms", (double)ss[i].source_uptime_ms);
+            cJSON_AddNumberToObject(
+                r, "ts", (double)epoch(ss[i].source_uptime_ms));
+            cJSON_AddNumberToObject(r, "ax", ss[i].imu.ax);
+            cJSON_AddNumberToObject(r, "ay", ss[i].imu.ay);
+            cJSON_AddNumberToObject(r, "az", ss[i].imu.az);
+            cJSON_AddNumberToObject(r, "gx", ss[i].imu.gx);
+            cJSON_AddNumberToObject(r, "gy", ss[i].imu.gy);
+            cJSON_AddNumberToObject(r, "gz", ss[i].imu.gz);
+            cJSON_AddItemToArray(arr, r);
+        }
+        if (p)
+        {
+            cJSON *po = pred_json(*p);
+            if (!po)
+            {
+                cJSON_Delete(root);
+                return ESP_ERR_NO_MEM;
+            }
+            cJSON_AddItemToObject(root, "prediction", po);
+        }
+        esp_err_t rc = encrypt_publish(telemetry, "telemetry", root, 1, false);
+        if (rc == ESP_OK)
+        {
+            batches++;
+            samples += (std::uint64_t)count;
+        }
+        return rc;
+    }
+    esp_err_t publish_state(const har::Prediction &p)
+    {
+        cJSON *root = cJSON_CreateObject();
+        if (!root)
+            return ESP_ERR_NO_MEM;
+        cJSON_AddStringToObject(root, "session_id", session);
+        cJSON_AddStringToObject(root, "worker_id", worker);
+        cJSON_AddStringToObject(root, "device_id", device);
+        cJSON *po = pred_json(p);
+        if (!po)
+        {
+            cJSON_Delete(root);
+            return ESP_ERR_NO_MEM;
+        }
+        cJSON_AddItemToObject(root, "prediction", po);
+        esp_err_t rc = encrypt_publish(state_topic, "state", root, 1, true);
+        if (rc == ESP_OK)
+            states++;
+        return rc;
+    }
+} // namespace tervanix::mqtt
