@@ -1,60 +1,59 @@
 services:
-    mosquitto:
-        image: eclipse-mosquitto:2
-        container_name: sg-nyp-a1-eg2a17-mosquitto
-        restart: always
-        ports:
-            - "1883:1883"
-        volumes:
-            - ${DIR_DATA}/instances/mosquitto/config:/mosquitto/config
-            - ${DIR_DATA}/instances/mosquitto/data:/mosquitto/data
-            - ${DIR_DATA}/instances/mosquitto/log:/mosquitto/log
-        networks:
-            - bridge_network
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: sg-nyp-a1-eg2a17-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ${DIR_DATA}/instances/mosquitto/data:/mosquitto/data
+      - ${DIR_DATA}/instances/mosquitto/log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/uptime' -C 1 -W 5 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s
+    networks:
+      - bridge_network
 
-    kafka-connect:
-        # Deployment target is a Raspberry Pi 5 (arm64) per the project README --
-        # verified this specific tag has a confirmed arm64 build on Docker Hub
-        # before pinning it (some older Confluent image tags don't).
-        image: confluentinc/cp-kafka-connect:7.6.12
-        container_name: sg-nyp-a1-eg2a17-kafka-connect
-        restart: always
-        ports:
-            - "8083:8083"
-        environment:
-            CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
-            CONNECT_GROUP_ID: "eg2a17-connect-cluster"
-            CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
-            CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
-            CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
-            CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
-            CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
-            CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
-            CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.converters.ByteArrayConverter"
-            CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.converters.ByteArrayConverter"
-            CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
-            CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
-        volumes:
-            - ${DIR_DATA}/instances/kafka-connect/plugins:/usr/share/confluent-hub-components
-        # Installs the Confluent MQTT Source Connector plugin on first boot if
-        # it isn't already present in the mounted plugins volume, then starts
-        # Connect normally. This means first startup takes longer (downloads
-        # the plugin); subsequent restarts are fast since it's cached in the
-        # volume.
-        command:
-            - bash
-            - -c
-            - |
-                if [ ! -d /usr/share/confluent-hub-components/confluentinc-kafka-connect-mqtt ]; then
-                    confluent-hub install --no-prompt confluentinc/kafka-connect-mqtt:latest
-                fi
-                /etc/confluent/docker/run
-        networks:
-            - default
-            - bridge_network
-        depends_on:
-            - mosquitto
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.6.12
+    container_name: sg-nyp-a1-eg2a17-kafka-connect
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_GROUP_ID: "eg2a17-connect-cluster"
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.converters.ByteArrayConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.converters.ByteArrayConverter"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+    volumes:
+      - ${DIR_DATA}/instances/kafka-connect/plugins:/usr/share/confluent-hub-components
+    command:
+      - bash
+      - -c
+      - |
+        if [ ! -d /usr/share/confluent-hub-components/confluentinc-kafka-connect-mqtt ]; then
+          confluent-hub install --no-prompt confluentinc/kafka-connect-mqtt:latest
+        fi
+        /etc/confluent/docker/run
+    networks:
+      - default
+      - bridge_network
+    depends_on:
+      mosquitto:
+        condition: service_healthy
 
 networks:
-    bridge_network:
-        driver: bridge
+  bridge_network:
+    driver: bridge
