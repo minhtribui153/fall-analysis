@@ -34,7 +34,7 @@ namespace
     constexpr int SAMPLE_RATE_HZ = 100;
     constexpr int MQTT_BATCH_SIZE = 10;
     constexpr int SNTP_SYNC_WAIT_MS = 5000;
-    constexpr std::time_t MIN_VALID_EPOCH = 1704067200; // 2024-01-01T00:00:00Z
+    constexpr std::time_t MIN_VALID_EPOCH = 1786595240; // 2026-08-13T04:27:20Z
 
     tervanix::identity::IdentityStore identity_store;
     std::atomic_bool time_synced{false};
