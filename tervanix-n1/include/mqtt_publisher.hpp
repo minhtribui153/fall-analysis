@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "identity_store.hpp"
 #include "imu/imu_sensor.hpp"
 
 /**
@@ -31,23 +32,24 @@ namespace tervanix::mqtt
 	 * connection process. Network connectivity must already be available.
 	 * @param broker_ip The MQTT broker's host IP Address
 	 * @param device_id This node's unique device UUID
-	 * @param bearer_token The node's bearer token
+	 * @param worker_id The registered worker ID
+	 * @param session_id The authenticated session_id
+	 * @param bearer_token The node's bearer token after generated from the server
 	 * @returns `ESP_OK` when the client starts successfully; otherwise, an
 	 *          ESP-IDF error code describing the initialisation failure.
 	 */
 	esp_err_t connect(
-		const char *broker_ip,
-		const char *device_id,
-		const char *bearer_token);
+		const char* broker_ip,
+		const char* device_id,
+		const char* worker_id,
+		const identity::SessionUuid& session_id,
+		const char* bearer_token
+	);
 
 	bool is_connected();
 	bool auth_rejected();
 	bool auth_accepted();
 	Stats stats();
 
-	esp_err_t publish_batch(
-		const TelemetrySample *samples,
-		int count,
-		const char *device_id);
-
+	esp_err_t publish_batch(const TelemetrySample* samples, int count);
 } // namespace tervanix::mqtt

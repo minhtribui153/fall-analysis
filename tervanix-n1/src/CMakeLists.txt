@@ -20,6 +20,7 @@ set(TERVANIX_REQUIRES
     esp_timer
     mqtt
     json
+    mbedtls
     driver
     esp_driver_i2c
     esp_lcd

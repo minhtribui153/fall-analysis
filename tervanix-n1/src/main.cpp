@@ -1,8 +1,8 @@
-#include "ble_advertiser.hpp"
 #include "board_config.hpp"
+#include "ble_advertiser.hpp"
 #include "device_identity.hpp"
-#include "health_display.hpp"
 #include "identity_store.hpp"
+#include "health_display.hpp"
 #include "mqtt_publisher.hpp"
 #include "wifi_manager.hpp"
 
@@ -27,81 +27,60 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-namespace
-{
+namespace {
 
     constexpr char TAG[] = "tervanix";
     constexpr int SAMPLE_RATE_HZ = 100;
     constexpr int MQTT_BATCH_SIZE = 10;
     constexpr int SNTP_SYNC_WAIT_MS = 5000;
-    constexpr std::time_t MIN_VALID_EPOCH = 1786595240; // 2026-08-13T04:27:20Z
+    constexpr std::time_t MIN_VALID_EPOCH = 1704067200;  // 2024-01-01T00:00:00Z
 
     tervanix::identity::IdentityStore identity_store;
-    std::atomic_bool time_synced{false};
-    std::atomic_bool imu_ready{false};
-    char status_device_id[18]{};
-    char status_gateway_ip[16]{};
+    std::atomic_bool time_synced {false};
+    std::atomic_bool imu_ready {false};
+    char status_device_id[18] {};
+    char status_gateway_ip[16] {};
 
-    /**
-    * @brief Initialises NVS storage.
-    *
-    * @return ESP_OK on success, otherwise an ESP-IDF error code.
-    */
     esp_err_t initialize_nvs()
     {
         esp_err_t result = nvs_flash_init();
-        if (result == ESP_ERR_NVS_NO_FREE_PAGES ||
-            result == ESP_ERR_NVS_NEW_VERSION_FOUND)
-        {
+        if (
+            result == ESP_ERR_NVS_NO_FREE_PAGES ||
+            result == ESP_ERR_NVS_NEW_VERSION_FOUND
+        ) {
             ESP_ERROR_CHECK(nvs_flash_erase());
             result = nvs_flash_init();
         }
         return result;
     }
 
-#if TERVANIX_HAS_IMU
-    /**
-    * @brief Gets the formatted hardware ID of the device.
-    *
-    * @param[out] out Stores the formatted hardware ID.
-    * @param[in] size Size of the output buffer.
-    */
-    void get_device_id(char *out, size_t n)
+    void get_device_id(char* out, std::size_t out_size)
     {
-        tervanix::identity::HardwareId id{};
+        tervanix::identity::HardwareId id {};
         ESP_ERROR_CHECK(tervanix::identity::get_hardware_id(id));
         tervanix::identity::format_device_id(id, out, out_size);
     }
-#endif
 
-    /**
-    * @brief Waits for BLE device registration to complete.
-    */
-    void wait_registration()
+    void wait_for_registration()
     {
         std::uint32_t wait_seconds = 0;
-        while (!tervanix::ble::registered())
-        {
+        while (!tervanix::ble::registered()) {
             vTaskDelay(pdMS_TO_TICKS(1000));
             ++wait_seconds;
-            if (wait_seconds % 10 == 0)
-            {
+            if (wait_seconds % 10 == 0) {
                 ESP_LOGW(
                     TAG,
-                    "Waiting for BLE registration before enabling Wi-Fi/MQTT "
-                    "(%us)",
-                    static_cast<unsigned>(wait_seconds));
+                    "Waiting for BLE registration before enabling Wi-Fi/MQTT (%us)",
+                    static_cast<unsigned>(wait_seconds)
+                );
             }
         }
-        ESP_LOGI(
-            TAG,
-            "BLE registration verified; enabling Wi-Fi telemetry transport");
+        ESP_LOGI(TAG, "BLE registration verified; enabling Wi-Fi telemetry transport");
     }
 
-    esp_err_t sync_time(const char *ntp_server_ip)
+    esp_err_t sync_time(const char* ntp_server_ip)
     {
-        if (ntp_server_ip == nullptr || ntp_server_ip[0] == '\0')
-        {
+        if (ntp_server_ip == nullptr || ntp_server_ip[0] == '\0') {
             ESP_LOGE(TAG, "SNTP server IP is empty");
             return ESP_ERR_INVALID_ARG;
         }
@@ -109,82 +88,81 @@ namespace
         ESP_LOGI(
             TAG,
             "Synchronizing system time from Raspberry Pi SNTP server %s",
-            ntp_server_ip);
+            ntp_server_ip
+        );
 
         esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(ntp_server_ip);
 
         const esp_err_t init_result = esp_netif_sntp_init(&config);
-        if (init_result != ESP_OK)
-        {
+        if (init_result != ESP_OK) {
             ESP_LOGE(
                 TAG,
                 "Failed to initialize SNTP against %s: %s",
                 ntp_server_ip,
-                esp_err_to_name(init_result));
+                esp_err_to_name(init_result)
+            );
             return init_result;
         }
 
         unsigned attempt = 0;
-        while (tervanix::wifi::is_connected())
-        {
+        while (tervanix::wifi::is_connected()) {
             ++attempt;
 
-            const esp_err_t result =
-                esp_netif_sntp_sync_wait(pdMS_TO_TICKS(SNTP_SYNC_WAIT_MS));
+            const esp_err_t result = esp_netif_sntp_sync_wait(
+                pdMS_TO_TICKS(SNTP_SYNC_WAIT_MS)
+            );
 
             const std::time_t now = std::time(nullptr);
-            if (result == ESP_OK && now >= MIN_VALID_EPOCH)
-            {
-                std::tm utc{};
+            if (result == ESP_OK && now >= MIN_VALID_EPOCH) {
+                std::tm utc {};
                 gmtime_r(&now, &utc);
 
-                char timestamp[32]{};
+                char timestamp[32] {};
                 std::strftime(
-                    timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+                    timestamp,
+                    sizeof(timestamp),
+                    "%Y-%m-%dT%H:%M:%SZ",
+                    &utc
+                );
 
                 ESP_LOGI(
                     TAG,
                     "System time synchronized from Raspberry Pi %s: %s",
                     ntp_server_ip,
-                    timestamp);
+                    timestamp
+                );
                 time_synced.store(true);
                 return ESP_OK;
             }
 
             ESP_LOGW(
                 TAG,
-                "Waiting for Raspberry Pi SNTP time from %s before MQTT "
-                "(attempt %u)",
+                "Waiting for Raspberry Pi SNTP time from %s before MQTT (attempt %u)",
                 ntp_server_ip,
-                attempt);
+                attempt
+            );
         }
 
-        ESP_LOGE(
-            TAG, "Wi-Fi disconnected before SNTP synchronization completed");
+        ESP_LOGE(TAG, "Wi-Fi disconnected before SNTP synchronization completed");
         return ESP_ERR_INVALID_STATE;
     }
+
 
     esp_err_t wait_for_mqtt_connection()
     {
         unsigned wait_count = 0;
 
-        while (tervanix::wifi::is_connected())
-        {
-            if (tervanix::mqtt::is_connected())
-            {
-                ESP_LOGI(
-                    TAG,
-                    "MQTT connection established; telemetry transport ready");
+        while (tervanix::wifi::is_connected()) {
+            if (tervanix::mqtt::is_connected()) {
+                ESP_LOGI(TAG, "MQTT connection established; telemetry transport ready");
                 return ESP_OK;
             }
 
             vTaskDelay(pdMS_TO_TICKS(100));
             ++wait_count;
 
-            if (wait_count % 50 == 0)
-            {
-                ESP_LOGW(
-                    TAG, "Waiting for MQTT broker connection at Wi-Fi gateway");
+            if (wait_count % 50 == 0) {
+                ESP_LOGW(TAG, "Waiting for MQTT broker connection at Wi-Fi gateway");
             }
         }
 
@@ -193,76 +171,60 @@ namespace
     }
 
 #if TERVANIX_HAS_IMU
-    void sensor_task(void *)
+    void sensor_task(void*)
     {
-        char device_id[18]{};
+        char device_id[18] {};
         get_device_id(device_id, sizeof(device_id));
 
-        tervanix::mqtt::TelemetrySample batch[MQTT_BATCH_SIZE]{};
+        tervanix::mqtt::TelemetrySample batch[MQTT_BATCH_SIZE] {};
         int batch_count = 0;
         std::uint32_t sequence = 1;
 
         const TickType_t sample_period = pdMS_TO_TICKS(1000 / SAMPLE_RATE_HZ);
         TickType_t wake_time = xTaskGetTickCount();
 
-        ESP_LOGI(
-            TAG,
-            "Publishing IMU as MQTT device_id=%s at %d Hz",
-            device_id,
-            SAMPLE_RATE_HZ);
+        ESP_LOGI(TAG, "Publishing IMU as MQTT device_id=%s at %d Hz", device_id, SAMPLE_RATE_HZ);
 
-        while (true)
-        {
-            if (tervanix::mqtt::auth_rejected())
-            {
+        while (true) {
+            if (tervanix::mqtt::auth_rejected()) {
                 ESP_LOGE(
                     TAG,
-                    "MQTT bearer token rejected; rebooting into BLE "
-                    "registration mode");
+                    "MQTT bearer token rejected; rebooting into BLE registration mode"
+                );
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 esp_restart();
             }
 
-            tervanix::sensor::ImuSample raw{};
-            if (tervanix::sensor::read_imu(raw) == ESP_OK)
-            {
-                batch[batch_count] = tervanix::mqtt::TelemetrySample{
+            tervanix::sensor::ImuSample raw {};
+            if (tervanix::sensor::read_imu(raw) == ESP_OK) {
+                batch[batch_count] = tervanix::mqtt::TelemetrySample {
                     .imu = raw,
                     .sequence = sequence++,
                     .source_uptime_ms = esp_timer_get_time() / 1000LL,
                 };
                 ++batch_count;
 
-                if (batch_count == MQTT_BATCH_SIZE)
-                {
+                if (batch_count == MQTT_BATCH_SIZE) {
                     const esp_err_t result = tervanix::mqtt::publish_batch(
-                        batch, batch_count, device_id);
+                        batch,
+                        batch_count
+                    );
 
-                    if (result == ESP_OK)
-                    {
+                    if (result == ESP_OK) {
                         batch_count = 0;
-                    } else if (result == ESP_ERR_INVALID_STATE)
-                    {
-                        // Preserve the current small batch while MQTT
-                        // reconnects. Sampling continues, but we do not grow an
-                        // unbounded queue.
-                    } else
-                    {
-                        ESP_LOGW(
-                            TAG,
-                            "MQTT batch publish failed: %s",
-                            esp_err_to_name(result));
+                    } else if (result == ESP_ERR_INVALID_STATE) {
+                        // Preserve the current small batch while MQTT reconnects.
+                        // Sampling continues, but we do not grow an unbounded queue.
+                    } else {
+                        ESP_LOGW(TAG, "MQTT batch publish failed: %s", esp_err_to_name(result));
                         batch_count = 0;
                     }
                 }
             }
 
             // If a full batch is waiting while MQTT is down, overwrite it with
-            // the newest samples rather than writing past the fixed-size
-            // buffer.
-            if (batch_count >= MQTT_BATCH_SIZE &&
-                !tervanix::mqtt::is_connected())
-            {
+            // the newest samples rather than writing past the fixed-size buffer.
+            if (batch_count >= MQTT_BATCH_SIZE && !tervanix::mqtt::is_connected()) {
                 batch_count = 0;
             }
 
@@ -271,33 +233,32 @@ namespace
     }
 #endif
 
-    void status_task(void *)
+    void status_task(void*)
     {
-        while (true)
-        {
+        while (true) {
             const auto mqtt_stats = tervanix::mqtt::stats();
 
             ESP_LOGI(
                 TAG,
-                "BLE=%s registration=%s WiFi=%s TIME=%s MQTT=%s AUTH=%s "
-                "token=%s node_uuid=%s server_uuid=%s",
+                "BLE=%s registration=%s WiFi=%s TIME=%s MQTT=%s AUTH=%s token=%s worker_id=%s worker=%s node_uuid=%s server_uuid=%s",
                 tervanix::ble::registered()
                     ? "COMPLETE"
-                    : (tervanix::ble::connected() ? "CONNECTED"
-                                                  : "DISCONNECTED"),
+                    : (tervanix::ble::connected() ? "CONNECTED" : "DISCONNECTED"),
                 tervanix::ble::registered() ? "REGISTERED" : "WAITING",
                 tervanix::wifi::is_connected() ? "CONNECTED" : "DISCONNECTED",
                 time_synced.load() ? "SYNCED" : "WAITING",
                 tervanix::mqtt::is_connected() ? "CONNECTED" : "DISCONNECTED",
                 tervanix::mqtt::auth_rejected()
                     ? "REJECTED"
-                    : (tervanix::mqtt::auth_accepted() ? "ACCEPTED"
-                                                       : "WAITING"),
+                    : (tervanix::mqtt::auth_accepted() ? "ACCEPTED" : "WAITING"),
                 identity_store.has_bearer_token() ? "STORED" : "MISSING",
+                identity_store.has_worker_context() ? identity_store.worker_id() : "MISSING",
+                identity_store.has_worker_context() ? identity_store.worker_name() : "MISSING",
                 identity_store.has_uuid() ? "STORED" : "MISSING",
-                identity_store.has_server_uuid() ? "STORED" : "MISSING");
+                identity_store.has_server_uuid() ? "STORED" : "MISSING"
+            );
 
-            const tervanix::health::Snapshot snapshot{
+            const tervanix::health::Snapshot snapshot {
                 .ble_connected = tervanix::ble::connected(),
                 .registered = tervanix::ble::registered(),
                 .wifi_connected = tervanix::wifi::is_connected(),
@@ -319,14 +280,14 @@ namespace
         }
     }
 
-} // namespace
+}  // namespace
 
 extern "C" void app_main()
 {
     ESP_ERROR_CHECK(initialize_nvs());
     ESP_ERROR_CHECK(identity_store.begin());
 
-    esp_chip_info_t chip_info{};
+    esp_chip_info_t chip_info {};
     esp_chip_info(&chip_info);
 
     ESP_LOGI(TAG, "Tervanix BLE-registration + Wi-Fi/MQTT firmware starting");
@@ -336,14 +297,9 @@ extern "C" void app_main()
     get_device_id(status_device_id, sizeof(status_device_id));
 
 #if defined(TERVANIX_BOARD_NESSO_N1)
-    const esp_err_t display_result =
-        tervanix::health::initialize(identity_store);
-    if (display_result != ESP_OK)
-    {
-        ESP_LOGW(
-            TAG,
-            "Nesso N1 health display unavailable: %s",
-            esp_err_to_name(display_result));
+    const esp_err_t display_result = tervanix::health::initialize(identity_store);
+    if (display_result != ESP_OK) {
+        ESP_LOGW(TAG, "Nesso N1 health display unavailable: %s", esp_err_to_name(display_result));
     }
 #endif
 
@@ -360,30 +316,49 @@ extern "C" void app_main()
 
     ESP_ERROR_CHECK(tervanix::wifi::connect());
 
-    char mqtt_broker_ip[16]{};
-    if (!tervanix::wifi::get_gateway_ip(mqtt_broker_ip, sizeof(mqtt_broker_ip)))
-    {
-        ESP_LOGE(
-            TAG, "Could not obtain MQTT broker IP from Wi-Fi default gateway");
+    char mqtt_broker_ip[16] {};
+    if (!tervanix::wifi::get_gateway_ip(mqtt_broker_ip, sizeof(mqtt_broker_ip))) {
+        ESP_LOGE(TAG, "Could not obtain MQTT broker IP from Wi-Fi default gateway");
         return;
     }
 
     ESP_LOGI(TAG, "Using Wi-Fi gateway %s as MQTT broker", mqtt_broker_ip);
-    std::strncpy(
-        status_gateway_ip, mqtt_broker_ip, sizeof(status_gateway_ip) - 1);
+    std::strncpy(status_gateway_ip, mqtt_broker_ip, sizeof(status_gateway_ip) - 1);
 
     // Telemetry must never start with an unsynchronized wall clock.
     ESP_ERROR_CHECK(sync_time(mqtt_broker_ip));
 
-    if (!identity_store.has_bearer_token())
-    {
-        ESP_LOGE(TAG, "Registration completed without an MQTT bearer token");
+    if (!identity_store.has_bearer_token() || !identity_store.has_worker_context()) {
+        ESP_LOGE(TAG, "Registration completed without worker/session credentials");
         return;
     }
 
-    ESP_ERROR_CHECK(
-        tervanix::mqtt::connect(
-            mqtt_broker_ip, status_device_id, identity_store.bearer_token()));
+    const std::time_t current_time = std::time(nullptr);
+    if (
+        identity_store.token_expires_at() != 0 &&
+        current_time >= static_cast<std::time_t>(identity_store.token_expires_at())
+    ) {
+        ESP_LOGW(TAG, "Local bearer session is expired; clearing session credentials and rebooting to BLE registration");
+        identity_store.clear_session_credentials();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Starting encrypted MQTT worker=%s name=%s session_expiry=%u",
+        identity_store.worker_id(),
+        identity_store.worker_name(),
+        static_cast<unsigned>(identity_store.token_expires_at())
+    );
+
+    ESP_ERROR_CHECK(tervanix::mqtt::connect(
+        mqtt_broker_ip,
+        status_device_id,
+        identity_store.worker_id(),
+        identity_store.session_id(),
+        identity_store.bearer_token()
+    ));
     ESP_ERROR_CHECK(wait_for_mqtt_connection());
 
 #if TERVANIX_HAS_IMU
