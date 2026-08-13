@@ -42,6 +42,11 @@ namespace
     char status_device_id[18]{};
     char status_gateway_ip[16]{};
 
+    /**
+    * @brief Initialises NVS storage.
+    *
+    * @return ESP_OK on success, otherwise an ESP-IDF error code.
+    */
     esp_err_t initialize_nvs()
     {
         esp_err_t result = nvs_flash_init();
@@ -54,14 +59,25 @@ namespace
         return result;
     }
 
-    void get_device_id(char *out, std::size_t out_size)
+#if TERVANIX_HAS_IMU
+    /**
+    * @brief Gets the formatted hardware ID of the device.
+    *
+    * @param[out] out Stores the formatted hardware ID.
+    * @param[in] size Size of the output buffer.
+    */
+    void get_device_id(char *out, size_t n)
     {
         tervanix::identity::HardwareId id{};
         ESP_ERROR_CHECK(tervanix::identity::get_hardware_id(id));
         tervanix::identity::format_device_id(id, out, out_size);
     }
+#endif
 
-    void wait_for_registration()
+    /**
+    * @brief Waits for BLE device registration to complete.
+    */
+    void wait_registration()
     {
         std::uint32_t wait_seconds = 0;
         while (!tervanix::ble::registered())

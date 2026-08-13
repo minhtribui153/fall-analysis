@@ -11,13 +11,15 @@
 namespace tervanix::protocol
 {
 
+/** @brief Current telemetry protocol version. */
+inline constexpr std::uint8_t telemetry_version = 1;
     /** @brief Current version of the BLE telemetry packet format. */
     inline constexpr std::uint8_t telemetry_version = 1;
 
     /** @brief Maximum number of IMU samples stored in one telemetry packet. */
     inline constexpr std::size_t telemetry_samples_per_packet = 2;
 
-    /** @brief Time between consecutive IMU samples at the 100 Hz sampling rate.
+    /** @brief Time between samples at 100 Hz.
      */
     inline constexpr std::uint32_t telemetry_sample_period_ms = 200;
 
@@ -55,17 +57,16 @@ namespace tervanix::protocol
         /** @brief Telemetry protocol version used by this packet. */
         std::uint8_t version;
 
-        /** @brief Number of valid entries currently stored in `samples`. */
+        /** @brief Number of samples stored in the packet. */
         std::uint8_t sample_count;
 
         /** @brief Raw six-byte hardware identifier of the sending node. */
         std::uint8_t hardware_id[6];
 
-        /** @brief Sequence number assigned to the first sample in this packet.
-         */
+        /** @brief Sequence number of the first sample. */
         std::uint32_t first_sample_sequence;
 
-        /** @brief Fixed-capacity array containing the packet's IMU samples. */
+        /** @brief IMU samples stored in the packet. */
         TelemetrySample samples[telemetry_samples_per_packet];
     };
 

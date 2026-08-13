@@ -66,8 +66,16 @@ IS_DOWN_SUSTAIN_MIN  = 0.15 # seconds -- has to stay down for a beat, not just f
 ORIENTATION_SPIKE_THRESH = 20  # degrees -- how far they have to lean/rotate to count as "something happened"
 
 MAX_DROPPED_IN_A_ROW = 10   # bad packets in a row before we assume the link dropped
-POST_EVENT_COOLDOWN  = 3.0  # seconds of quiet after an event before we'll trigger again
 
+# Strong-fall override.
+# Based on the current real recording:
+# actual suspected fall ~= 3.0g / 331 deg/s
+# other events were < 2.5g / 230 deg/s
+STRONG_IMPACT_THRESH = 2.8
+STRONG_ROTATION_THRESH = 280
+
+# Slightly longer to reduce one movement generating several events.
+POST_EVENT_COOLDOWN = 6.0
 # A heads-up on FFH_FREEFALL_MIN: in testing, this hasn't actually been able to
 # tell a real height-fall apart from a same-level trip/slip -- both showed
 # similarly short freefall times, probably because staged test falls don't
@@ -78,28 +86,24 @@ POST_EVENT_COOLDOWN  = 3.0  # seconds of quiet after an event before we'll trigg
 
 
 def _smv(ax, ay, az):
-    """Signal magnitude vector -- basically 'how much total acceleration',
-    ignoring which direction it's pointing."""
+    """Calculates the total acceleration magnitude."""
     return math.sqrt(ax ** 2 + ay ** 2 + az ** 2)
 
 
 def _gyro_magnitude(gx, gy, gz):
-    """Same idea but for rotation speed (deg/s). Used as supporting
-    evidence, not the main trigger -- a controlled motion like sitting
-    down can still spike gyro briefly without being a fall."""
+    """Calculates the total gyroscope magnitude."""
     return math.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
 
 
 def _tilt_angle(ax, ay, az):
-    """Roughly: how far off 'upright' is the device right now, in degrees.
+    """Calculates the device tilt angle in degrees.
 
-    Heads up: this assumes gravity mostly sits on the X axis when the
-    device is worn upright -- which is true for how the NESSO N1 sits
+    This assumes gravity mostly sits on the X axis when the
+    device is worn upright which is true for how the NESSO N1 sits
     on a waist clip, confirmed against real walking data (ax averaged
     around -0.91g at rest). If someone mounts the device differently
     (different clip angle, different body position), this axis
-    assumption breaks and tilt readings will be meaningless. Worth
-    double-checking if a second sensor gets added with a different mount.
+    assumption breaks and tilt readings will be meaningless.
     """
     mag = _smv(ax, ay, az)
     if mag == 0:
@@ -131,16 +135,16 @@ class ActivityClassifier:
     the person's doing right now: stationary, walking, running, or
     jumping.
 
-    This is intentionally simple -- no FFT, no ML, just basic stats on
+    This is intentionally simple, no FFT, no ML, just basic stats on
     the accel magnitude over a short window. It won't win any research
     awards, but it correctly identifies all four states on real
-    continuous recordings (stationary, walking, running, jumping --
+    continuous recordings (stationary, walking, running, jumping with
     ~300-400 samples each, done back to back) once the window has
     enough data to say something.
 
     Worth knowing how walking/running/jumping actually get told apart:
     walking never dips below 0.6g in the real data (lowest recorded was
-    0.678g), while running and jumping both do, repeatedly -- so "any
+    0.678g), while running and jumping both do, repeatedly, so "any
     dip at all" is what separates walking from the other two. Running
     and jumping then split on how OFTEN they dip: running's stride
     cycle is faster (~11 dips/sec in the recording) than a jump's
@@ -154,8 +158,8 @@ class ActivityClassifier:
     destabilization phase can look a lot like a jump's dip-then-spike
     signature. So `activity_before_event` on a FALL result sometimes
     reflects the fall's own onset rather than what the person was
-    genuinely doing a second earlier -- seen this happen a few times
-    in testing. Not a bug exactly, just a real limit of using a short
+    genuinely doing a second earlier, seen this happen a few times
+    in testing. Not a bug tbh, just some limit of using a short
     rolling window right up against the moment something dramatic
     starts happening.
 
@@ -451,17 +455,55 @@ class FallDetector:
         # All four have to agree -- any one on its own isn't reliable
         # enough (e.g. a hard knock without tumbling, or a lean without
         # actually going down).
-        if valid_impact and had_rotation_spike and had_orientation_spike and is_down:
-            # See the FFH_FREEFALL_MIN note near the top of the file --
-            # this split hasn't actually been validated against a real
-            # height fall yet, so don't take the FFH/STF label here as
-            # gospel, just a best guess.
+        # A very strong impact + rotation combination is enough to classify
+        # a fall even if the absolute "is_down" orientation check fails.
+        #
+        # This is useful because the waist-mounted sensor orientation can make
+        # a fixed posture threshold unreliable.
+        strong_fall_signature = (
+            max_smv >= STRONG_IMPACT_THRESH
+            and max_rotation >= STRONG_ROTATION_THRESH
+            and had_orientation_spike
+        )
+
+        # Normal fall path:
+        # impact + rotation + orientation disturbance must be present,
+        # followed by either:
+        #   - a detected lying/down posture, OR
+        #   - low movement after impact.
+        #
+        # This makes is_down supporting evidence rather than a hard requirement.
+        normal_fall_signature = (
+            valid_impact
+            and had_rotation_spike
+            and had_orientation_spike
+            and (is_down or is_still)
+        )
+
+        if strong_fall_signature or normal_fall_signature:
             fall_type = "FFH" if had_freefall else "STF"
-            return {**base, "event_type": "FALL", "fall_type": fall_type}
+            return {
+                **base,
+                "event_type": "FALL",
+                "fall_type": fall_type,
+            }
 
-        # NEAR_MISS: rotation spike + a real orientation disturbance,
-        # but they didn't end up down -- stumbled, caught themselves.
-        if had_rotation_spike and had_orientation_spike and not is_down:
-            return {**base, "event_type": "NEAR_MISS", "fall_type": None}
+        # Near miss:
+        # strong rotation + orientation disturbance occurred,
+        # but it did not satisfy either fall signature.
+        if (
+            had_rotation_spike
+            and had_orientation_spike
+            and not strong_fall_signature
+        ):
+            return {
+                **base,
+                "event_type": "NEAR_MISS",
+                "fall_type": None,
+            }
 
-        return {**base, "event_type": "NORMAL", "fall_type": None}
+        return {
+            **base,
+            "event_type": "NORMAL",
+            "fall_type": None,
+        }

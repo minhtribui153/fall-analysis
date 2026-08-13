@@ -5,42 +5,77 @@ SHELL := /bin/bash
 ACTION    := $(firstword $(MAKECMDGOALS))
 SERVICES  := $(wordlist 2, $(words $(MAKECMDGOALS)), $(MAKECMDGOALS))
 
-.PHONY: up down
+export COMPOSE_PROJECT_DIRECTORY := $(PROJECT_ROOT)
+export COMPOSE_ENV_FILES := $(PROJECT_ROOT)/.env
 
-$(ACTION):
-	@if [ ! -f "$(PROJECT_ROOT)/.env" ]; then \
-		echo "[error] .env file not found at: $(PROJECT_ROOT)/.env"; \
-		exit 1; \
+.PHONY: start stop reset clean
+
+start stop reset clean:
+	@set -euo pipefail
+
+	if [ ! -f "$(PROJECT_ROOT)/.env" ]; then
+		echo "[error] .env file not found at: $(PROJECT_ROOT)/.env"
+		exit 1
 	fi
 
-	if [ -z "$(SERVICES)" ]; then \
-		echo "[error] missing service name(s) for action '$(ACTION)'"; \
-		exit 1; \
+	if [ "$@" != "clean" ] && [ -z "$(SERVICES)" ]; then
+		echo "[error] missing service name(s) for action '$@'"
+		exit 1
 	fi
 
-	for service in $(SERVICES); do \
-		FILE="./compose.$${service}.yaml"; \
-		if [ ! -f "$${FILE}" ]; then \
-			echo "[error] file not found: deployment/compose.$${service}.yaml"; \
-			exit 1; \
-		fi; \
-		if [ "$(ACTION)" = "up" ]; then \
-			echo "[ info] deploying $$service via $$FILE..."; \
-			docker compose \
-				--project-directory "$(PROJECT_ROOT)" \
-				--env-file "$(PROJECT_ROOT)/.env" \
-				-f $$FILE up -d; \
-		elif [ "$(ACTION)" = "down" ]; then \
-			echo "[ info] shutting down $$service..."; \
-			docker compose \
-				--project-directory "$(PROJECT_ROOT)" \
-				--env-file "$(PROJECT_ROOT)/.env" \
-				-f $$FILE down; \
-		else \
-			echo "[error] unknown action '$(ACTION)' inside deployment module"; \
-			exit 1; \
-		fi; \
+	COMPOSE_ARGS=()
+
+	for service in $(SERVICES); do
+		FILE="$(CURDIR)/compose.$${service}.yaml"
+
+		if [ ! -f "$${FILE}" ]; then
+			echo "[error] file not found: $${FILE}"
+			exit 1
+		fi
+
+		COMPOSE_ARGS+=(-f "$${FILE}")
 	done
 
+	case "$@" in
+		start)
+			echo "[ info] starting services: $(SERVICES)..."
+			docker compose "$${COMPOSE_ARGS[@]}" up -d --no-recreate
+			;;
+
+		stop)
+			echo "[ info] stopping services: $(SERVICES)..."
+			docker compose "$${COMPOSE_ARGS[@]}" stop
+			;;
+
+		reset)
+			echo "[ info] resetting services: $(SERVICES)..."
+			docker compose $${COMPOSE_FILES} down --remove-orphans
+			docker compose $${COMPOSE_FILES} up -d --force-recreate
+			;;
+
+		clean)
+			echo "[ info] cleaning orphaned and unused project resources..."
+
+			if [ "$${#COMPOSE_ARGS[@]}" -gt 0 ]; then
+				docker compose "$${COMPOSE_ARGS[@]}" down \
+					--remove-orphans \
+					--volumes
+			else
+				docker container prune -f \
+					--filter "label=com.docker.compose.project.working_dir=$(PROJECT_ROOT)"
+
+				docker network prune -f \
+					--filter "label=com.docker.compose.project.working_dir=$(PROJECT_ROOT)"
+
+				docker volume prune -f \
+					--filter "label=com.docker.compose.project.working_dir=$(PROJECT_ROOT)"
+			fi
+			;;
+	esac
+
+# Treat additional command-line goals as service names.
 %:
-	@true
+	@if [ "$@" = "$(ACTION)" ]; then \
+		echo "[error] unknown action '$@' inside deployment module"; \
+		exit 1; \
+	fi
