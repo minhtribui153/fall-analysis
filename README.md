@@ -17,6 +17,11 @@ An NYP Data Engineering Project that checks for fall detection.
 > by default. If inside, you will only need to install
 > Docker and Node.JS.
 
+### Installing necessary dependencies
+```bash
+sudo apt install chrony mosquitto mosquitto-client -y
+```
+
 ### Deploying Docker Containers
 > Please ensure that you have created a `.env` file into the
 > project root directory, with reference from `.env.example`
