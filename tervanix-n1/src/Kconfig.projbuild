@@ -1,0 +1,16 @@
+menu "Tervanix Wi-Fi"
+
+    config TERVANIX_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            Wi-Fi network used by the ESP32 to reach the MQTT broker.
+            BLE is not used for telemetry.
+
+    config TERVANIX_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            Password for CONFIG_TERVANIX_WIFI_SSID.
+
+endmenu

@@ -5,7 +5,7 @@ services:
         restart: always
 
         env_file:
-            - .env
+            - ../.env
 
         environment:
             POSTGRES_DB: ${POSTGRES_DB}
@@ -34,7 +34,7 @@ services:
         container_name: sg-nyp-a1-eg2a17-pgadmin-init
         user: "root"
         env_file:
-            - .env
+            - ../.env
         volumes:
             - ${DIR_DATA}/instances/pgadmin:/mnt/pgadmin
         command: >
@@ -67,7 +67,7 @@ services:
         restart: always
 
         env_file:
-            - .env
+            - ../.env
 
         environment:
             PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}

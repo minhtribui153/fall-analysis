@@ -1,0 +1,16 @@
+digraph G {
+  graph [rankdir=TB, bgcolor="transparent", pad=0.3, nodesep=0.35, ranksep=0.55, fontname="Arial"];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=10.5, color="#334155", fillcolor="#F8FAFC", margin="0.16,0.10"];
+  edge [fontname="Arial", fontsize=9, color="#475569", arrowsize=0.75];
+
+  a [label="1. BMI270 samples at 100 Hz", fillcolor="#FFF7ED", color="#EA580C"];
+  b [label="2. Nesso packs 2 samples\ninto a 60-byte BLE packet"];
+  c [label="3. Gateway validates registration\nand sequence number", fillcolor="#EFF6FF", color="#2563EB"];
+  d [label="4. Gateway timestamps samples\nand buffers 10 readings"];
+  e [label="5. Publish JSON array to MQTT\ntopic sensor-readings"];
+  f [label="6. Kafka Connect copies payload\nto Kafka topic sensor-readings", fillcolor="#F0FDF4", color="#16A34A"];
+  g [label="7. Consumer calculates SMV, gyro\nand event/activity state"];
+  h [label="8. Insert raw and derived records\ninto PostgreSQL"];
+
+  a -> b -> c -> d -> e -> f -> g -> h;
+}

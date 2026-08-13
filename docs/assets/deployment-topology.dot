@@ -1,0 +1,32 @@
+digraph G {
+  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.45, ranksep=0.8, fontname="Arial", compound=true];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=10.5, color="#334155", fillcolor="#FFFFFF", margin="0.16,0.10"];
+  edge [fontname="Arial", fontsize=9, color="#475569", arrowsize=0.75];
+
+  nesso [label="Nesso N1\nBLE only", fillcolor="#FFF7ED", color="#EA580C"];
+
+  subgraph cluster_laptop {
+    label="Windows laptop"; color="#93C5FD"; style="rounded,filled"; fillcolor="#EFF6FF"; fontname="Arial";
+    gateway [label="Python BLE gateway\nBluetooth peripheral"];
+  }
+
+  subgraph cluster_pi {
+    label="Raspberry Pi 5"; color="#86EFAC"; style="rounded,filled"; fillcolor="#F0FDF4"; fontname="Arial";
+    mqtt [label="Mosquitto\n1883"];
+    postgres [label="PostgreSQL\n5432"];
+    connect [label="Kafka Connect\n8083"];
+    kafka [label="Kafka\n9092 / 19092"];
+    consumer [label="Python consumer\nPi host process"];
+    admin [label="pgAdmin 5050\nKafka UI 8080"];
+  }
+
+  nesso -> gateway [label="BLE"];
+  gateway -> mqtt [label="LAN TCP 1883"];
+  gateway -> postgres [label="LAN TCP 5432\nregistration"];
+  mqtt -> connect;
+  connect -> kafka;
+  kafka -> consumer [label="localhost:19092"];
+  consumer -> postgres;
+  admin -> kafka [dir=both, style=dashed];
+  admin -> postgres [dir=both, style=dashed];
+}
