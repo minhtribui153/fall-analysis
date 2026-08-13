@@ -23,8 +23,8 @@ def base_url() -> str:
 
 
 def admin_token() -> str:
-    # A token is optional. When blank, the server accepts admin calls only
-    # from a direct loopback connection.
+    # When blank, n1_registration_server.py only accepts admin calls from a
+    # direct loopback connection on the Raspberry Pi.
     return os.getenv("REGISTRATION_ADMIN_TOKEN", "").strip()
 
 
@@ -34,10 +34,7 @@ def request_json(
     body: dict[str, Any] | None = None,
     timeout: float = 10.0,
 ) -> Any:
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-
+    data = None if body is None else json.dumps(body).encode("utf-8")
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -56,9 +53,7 @@ def request_json(
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
-            if not raw:
-                return None
-            return json.loads(raw.decode("utf-8"))
+            return None if not raw else json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as error:
         raw = error.read().decode("utf-8", errors="replace")
         try:
@@ -85,18 +80,19 @@ def print_rows(payload: dict[str, Any]) -> None:
         "device_id",
         "node_uuid",
         "approval_status",
+        "token_issued",
         "requested_at",
+        "decided_at",
         "decided_by",
         "decision_reason",
+        "last_authenticated_at",
+        "last_auth_failure_at",
     )
     widths = {column: len(column) for column in columns}
 
     for row in rows:
         for column in columns:
-            widths[column] = max(
-                widths[column],
-                len(str(row.get(column) or "")),
-            )
+            widths[column] = max(widths[column], len(str(row.get(column) or "")))
 
     print("  ".join(column.ljust(widths[column]) for column in columns))
     print("  ".join("-" * widths[column] for column in columns))
@@ -124,9 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="n1-admin",
         description=(
-            "Manage Tervanix registrations through n1_registration_server. "
-            "With no admin token, run this CLI on the Raspberry Pi using "
-            "the default 127.0.0.1 URL."
+            "Approve/reject Tervanix BLE registrations through "
+            "n1_registration_server.py. With no admin token, run this CLI "
+            "locally on the Raspberry Pi using 127.0.0.1."
         ),
     )
     parser.add_argument(
@@ -139,13 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--token",
         help=(
-            "Bearer token. Overrides REGISTRATION_ADMIN_TOKEN. Leave blank "
-            "for the server's local-only mode."
+            "Admin bearer token. Overrides REGISTRATION_ADMIN_TOKEN. "
+            "Leave blank for local-only mode."
         ),
     )
 
     subcommands = parser.add_subparsers(dest="command", required=True)
-
     subcommands.add_parser("health", help="Show server health and admin mode")
 
     list_parser = subcommands.add_parser("list", help="List registrations")

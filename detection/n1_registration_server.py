@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import hmac
 import ipaddress
 import json
 import logging
 import os
+import secrets
 import signal
 import struct
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any, Awaitable, Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 import psycopg
 from aiohttp import web
@@ -35,6 +39,7 @@ logger = logging.getLogger("tervanix.registration")
 SERVER_NAME = "TVX-REG"
 SERVICE_UUID = "7db20000-6e8d-4d8d-a991-2cf812340000"
 REGISTRATION_UUID = "7db20001-6e8d-4d8d-a991-2cf812340000"
+CREDENTIAL_UUID = "7db20002-6e8d-4d8d-a991-2cf812340000"
 
 PROTOCOL_VERSION = 2
 FLAG_HAS_UUID = 1 << 0
@@ -45,26 +50,20 @@ STATUS_EXISTING_ACCEPTED = 1
 STATUS_NEW_ASSIGNED = 2
 STATUS_IDENTITY_REJECTED = 3
 STATUS_SERVER_REJECTED = 4
-STATUS_PENDING_APPROVAL = 5
-STATUS_ADMIN_REJECTED = 6
 
+# These formats intentionally match the immutable C++ structs. The response
+# contains three alignment bytes before uint32_t nonce and is therefore 40 B.
 REQUEST_FORMAT = "<BB6s16s16sI"
-RESPONSE_FORMAT = "<B16s16sI"
+RESPONSE_FORMAT = "<B16s16s3xI"
 REQUEST_SIZE = struct.calcsize(REQUEST_FORMAT)
 RESPONSE_SIZE = struct.calcsize(RESPONSE_FORMAT)
 ZERO_UUID = uuid.UUID(int=0)
 
-HTTP_HOST = os.getenv("REGISTRATION_HTTP_HOST", "0.0.0.0")
-HTTP_PORT = int(os.getenv("REGISTRATION_HTTP_PORT", "8765"))
+ADMIN_HOST = os.getenv("REGISTRATION_ADMIN_HOST", "0.0.0.0")
+ADMIN_PORT = int(os.getenv("REGISTRATION_ADMIN_PORT", "8765"))
 ADMIN_TOKEN = os.getenv("REGISTRATION_ADMIN_TOKEN", "").strip()
 
-ADMIN_STATUSES = frozenset({"pending", "approved", "rejected", "all"})
-DECISION_ACTIONS = {
-    "approve": "approved",
-    "reject": "rejected",
-}
-
-Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+VALID_APPROVAL_STATUSES = {"pending", "approved", "rejected"}
 
 
 def make_database_url() -> str:
@@ -88,9 +87,7 @@ def make_database_url() -> str:
         if not value
     ]
     if missing:
-        raise RuntimeError(
-            "Set DATABASE_URL or define: " + ", ".join(missing)
-        )
+        raise RuntimeError("Set DATABASE_URL or define: " + ", ".join(missing))
 
     return f"postgresql://{user}:{password}@{host}:{port}/{database}"
 
@@ -100,6 +97,7 @@ DATABASE_URL = make_database_url()
 
 @dataclass(frozen=True)
 class RegistrationRequest:
+    device_id_bytes: bytes
     device_id: str
     current_uuid: uuid.UUID | None
     expected_server_uuid: uuid.UUID | None
@@ -116,7 +114,7 @@ class RegistrationResult:
 
 def format_device_id(raw: bytes) -> str:
     if len(raw) != 6:
-        raise ValueError("hardware identifier must contain exactly 6 bytes")
+        raise ValueError("device_id must contain exactly 6 bytes")
     return ":".join(f"{byte:02X}" for byte in raw)
 
 
@@ -124,71 +122,53 @@ def normalize_device_id(value: str) -> str:
     parts = value.strip().upper().split(":")
     if len(parts) != 6 or any(len(part) != 2 for part in parts):
         raise ValueError("device_id must use AA:BB:CC:DD:EE:FF format")
-
     try:
         bytes(int(part, 16) for part in parts)
     except ValueError as error:
-        raise ValueError(
-            "device_id must use hexadecimal AA:BB:CC:DD:EE:FF format"
-        ) from error
-
+        raise ValueError("device_id contains non-hexadecimal bytes") from error
     return ":".join(parts)
 
 
-def optional_uuid(value: Any) -> uuid.UUID | None:
-    if value in (None, "", str(ZERO_UUID)):
-        return None
-    parsed = uuid.UUID(str(value))
-    return None if parsed.int == 0 else parsed
-
-
-def parse_request(value: bytes) -> RegistrationRequest:
+def parse_registration_request(value: bytes) -> RegistrationRequest:
     if len(value) != REQUEST_SIZE:
         raise ValueError(
-            f"Expected {REQUEST_SIZE} bytes, received {len(value)}"
+            f"Expected {REQUEST_SIZE} registration bytes, received {len(value)}"
         )
 
     (
         version,
         flags,
-        raw_device_id,
+        device_id_bytes,
         current_uuid_raw,
-        server_uuid_raw,
+        expected_server_uuid_raw,
         nonce,
     ) = struct.unpack(REQUEST_FORMAT, value)
 
     if version != PROTOCOL_VERSION:
-        raise ValueError(f"Unsupported protocol version {version}")
+        raise ValueError(f"Unsupported registration protocol version {version}")
 
-    current_uuid = (
-        uuid.UUID(bytes=current_uuid_raw)
-        if flags & FLAG_HAS_UUID
-        else None
-    )
-    expected_server_uuid = (
-        uuid.UUID(bytes=server_uuid_raw)
-        if flags & FLAG_HAS_SERVER_UUID
-        else None
-    )
+    current_uuid: uuid.UUID | None = None
+    if flags & FLAG_HAS_UUID:
+        parsed = uuid.UUID(bytes=current_uuid_raw)
+        if parsed.int != 0:
+            current_uuid = parsed
+
+    expected_server_uuid: uuid.UUID | None = None
+    if flags & FLAG_HAS_SERVER_UUID:
+        parsed = uuid.UUID(bytes=expected_server_uuid_raw)
+        if parsed.int != 0:
+            expected_server_uuid = parsed
 
     return RegistrationRequest(
-        device_id=format_device_id(raw_device_id),
-        current_uuid=(
-            None
-            if current_uuid is not None and current_uuid.int == 0
-            else current_uuid
-        ),
-        expected_server_uuid=(
-            None
-            if expected_server_uuid is not None
-            and expected_server_uuid.int == 0
-            else expected_server_uuid
-        ),
+        device_id_bytes=device_id_bytes,
+        device_id=format_device_id(device_id_bytes),
+        current_uuid=current_uuid,
+        expected_server_uuid=expected_server_uuid,
         nonce=nonce,
     )
 
 
-def build_response(result: RegistrationResult, nonce: int) -> bytes:
+def build_registration_response(result: RegistrationResult, nonce: int) -> bytes:
     return struct.pack(
         RESPONSE_FORMAT,
         result.status,
@@ -198,115 +178,221 @@ def build_response(result: RegistrationResult, nonce: int) -> bytes:
     )
 
 
-def json_value(value: Any) -> Any:
-    if isinstance(value, uuid.UUID):
-        return str(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
+def load_server_uuid() -> uuid.UUID:
+    configured = os.getenv("REGISTRATION_SERVER_UUID", "").strip()
+    if configured:
+        value = uuid.UUID(configured)
+        logger.info("Using REGISTRATION_SERVER_UUID=%s", value)
+        return value
+
+    default_file = Path(__file__).resolve().with_name(".registration_server_uuid")
+    path = Path(os.getenv("REGISTRATION_SERVER_UUID_FILE", str(default_file)))
+
+    if path.exists():
+        value = uuid.UUID(path.read_text(encoding="utf-8").strip())
+        logger.info("Loaded registration server UUID %s from %s", value, path)
+        return value
+
+    value = uuid.uuid4()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(value) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    logger.info("Created registration server UUID %s in %s", value, path)
     return value
 
 
-def row_to_dict(columns: tuple[str, ...], row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        column: json_value(value)
-        for column, value in zip(columns, row, strict=True)
+def load_token_secret() -> bytes:
+    configured = os.getenv("REGISTRATION_TOKEN_SECRET", "").strip()
+    if configured:
+        if len(configured) < 32:
+            raise RuntimeError("REGISTRATION_TOKEN_SECRET must be at least 32 characters")
+        return configured.encode("utf-8")
+
+    default_file = Path(__file__).resolve().with_name(".registration_token_secret")
+    path = Path(os.getenv("REGISTRATION_TOKEN_SECRET_FILE", str(default_file)))
+
+    if path.exists():
+        value = path.read_text(encoding="utf-8").strip()
+        if len(value) < 32:
+            raise RuntimeError(f"Token secret in {path} is too short")
+        logger.info("Loaded persistent registration token secret from %s", path)
+        return value.encode("utf-8")
+
+    value = secrets.token_urlsafe(48)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    logger.info("Created persistent registration token secret in %s", path)
+    return value.encode("utf-8")
+
+
+def derive_bearer_token(
+    token_secret: bytes,
+    registration_id: int,
+    device_id: str,
+    node_uuid: uuid.UUID,
+    token_issued_at: datetime,
+) -> str:
+    if token_issued_at.tzinfo is None:
+        token_issued_at = token_issued_at.replace(tzinfo=timezone.utc)
+    issued_us = int(token_issued_at.timestamp() * 1_000_000)
+    material = (
+        f"v1|{registration_id}|{device_id}|{node_uuid}|{issued_us}"
+    ).encode("utf-8")
+    digest = hmac.new(token_secret, material, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def hash_bearer_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def validate_database_schema() -> None:
+    required = {
+        ("public", "node_registrations"): {
+            "registration_id",
+            "device_id",
+            "node_uuid",
+            "approval_status",
+            "token_hash",
+            "token_issued_at",
+            "token_revoked_at",
+            "active",
+            "requested_at",
+            "registered_at",
+            "last_seen_at",
+            "decided_at",
+            "decided_by",
+            "decision_reason",
+            "last_authenticated_at",
+            "last_auth_failure_at",
+            "delinked_at",
+        },
+        ("devices", "identification"): {
+            "device_id",
+            "ble_address",
+            "registered_at",
+            "last_seen_at",
+        },
+        ("devices", "registration_audit"): {
+            "audit_id",
+            "registration_id",
+            "device_id",
+            "previous_status",
+            "new_status",
+            "actor",
+            "reason",
+            "created_at",
+        },
     }
 
-
-def initialize_database() -> uuid.UUID:
-    """Load the persistent registrar UUID.
-
-    Database tables are expected to be created by versioned SQL migrations.
-    This function deliberately does not create or alter application tables.
-    """
     with psycopg.connect(DATABASE_URL) as connection:
-        row = connection.execute(
-            """
-            SELECT server_uuid
-            FROM registration_server_identity
-            WHERE singleton = TRUE
-            """
-        ).fetchone()
-
-        if row is None:
-            pending = connection.execute(
+        for (schema_name, table_name), expected_columns in required.items():
+            rows = connection.execute(
                 """
-                SELECT
-                    registration_id,
-                    claimed_uuid,
-                    approval_status
-                FROM node_registrations
-                WHERE device_id = %s
-                AND active = TRUE
-                AND approval_status = 'pending'
-                FOR UPDATE
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND table_name = %s
                 """,
-                (request.device_id,),
-            ).fetchone()
-
-            if pending is None:
-                connection.execute(
-                    """
-                    INSERT INTO node_registrations (
-                        device_id,
-                        node_uuid,
-                        claimed_uuid,
-                        active,
-                        approval_status,
-                        request_kind,
-                        requested_at,
-                        last_seen_at
-                    )
-                    VALUES (
-                        %s,
-                        %s,
-                        %s,
-                        TRUE,
-                        'pending',
-                        'identity_recovery',
-                        now(),
-                        now()
-                    )
-                    """,
-                    (
-                        request.device_id,
-                        uuid.uuid4(),
-                        request.current_uuid,
-                    ),
-                )
-            else:
-                connection.execute(
-                    """
-                    UPDATE node_registrations
-                    SET claimed_uuid = %s,
-                        request_kind = 'identity_recovery',
-                        requested_at = now(),
-                        last_seen_at = now(),
-                        revision = revision + 1
-                    WHERE registration_id = %s
-                    """,
-                    (
-                        request.current_uuid,
-                        pending[0],
-                    ),
+                (schema_name, table_name),
+            ).fetchall()
+            actual_columns = {str(row[0]) for row in rows}
+            missing = sorted(expected_columns - actual_columns)
+            if missing:
+                raise RuntimeError(
+                    f"{schema_name}.{table_name} is missing columns: "
+                    + ", ".join(missing)
                 )
 
-            return RegistrationResult(
-                status=STATUS_PENDING_APPROVAL,
-                node_uuid=ZERO_UUID,
-                server_uuid=server_uuid,
-                reason="identity_recovery_pending",
+        obsolete_node_uuid = connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'devices'
+                  AND table_name = 'identification'
+                  AND column_name = 'node_uuid'
             )
-        else:
-            server_uuid = row[0]
+            """
+        ).fetchone()[0]
+        if obsolete_node_uuid:
+            raise RuntimeError(
+                "devices.identification still contains node_uuid; apply the current "
+                "device_id-only schema before starting the registration server"
+            )
 
-    logger.info("Database ready; server_uuid=%s", server_uuid)
-    return server_uuid
+    logger.info("Database schema is compatible with registration + bearer auth")
+
+
+def sync_identification(
+    connection: psycopg.Connection[Any],
+    device_id: str,
+    ble_address: str | None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO devices.identification (
+            device_id,
+            ble_address,
+            registered_at,
+            last_seen_at
+        )
+        VALUES (%s, %s, now(), now())
+        ON CONFLICT (device_id)
+        DO UPDATE SET
+            ble_address = COALESCE(
+                EXCLUDED.ble_address,
+                devices.identification.ble_address
+            ),
+            last_seen_at = now()
+        """,
+        (device_id, ble_address),
+    )
+
+
+def add_audit(
+    connection: psycopg.Connection[Any],
+    registration_id: int,
+    device_id: str,
+    previous_status: str | None,
+    new_status: str,
+    actor: str,
+    reason: str | None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO devices.registration_audit (
+            registration_id,
+            device_id,
+            previous_status,
+            new_status,
+            actor,
+            reason
+        )
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (
+            registration_id,
+            device_id,
+            previous_status,
+            new_status,
+            actor,
+            reason or None,
+        ),
+    )
 
 
 def register_or_verify(
     request: RegistrationRequest,
     server_uuid: uuid.UUID,
+    ble_address: str | None,
 ) -> RegistrationResult:
     if (
         request.expected_server_uuid is not None
@@ -321,13 +407,15 @@ def register_or_verify(
 
     with psycopg.connect(DATABASE_URL) as connection:
         with connection.transaction():
-            row = connection.execute(
+            active_row = connection.execute(
                 """
                 SELECT
                     registration_id,
                     node_uuid,
-                    approval_status
-                FROM node_registrations
+                    approval_status,
+                    token_hash,
+                    token_issued_at
+                FROM public.node_registrations
                 WHERE device_id = %s
                   AND active = TRUE
                 FOR UPDATE
@@ -335,430 +423,282 @@ def register_or_verify(
                 (request.device_id,),
             ).fetchone()
 
-            if request.current_uuid is not None:
-                if row is None or row[1] != request.current_uuid:
+            if active_row is not None:
+                (
+                    registration_id,
+                    registered_uuid,
+                    approval_status,
+                    token_hash,
+                    token_issued_at,
+                ) = active_row
+
+                if (
+                    request.current_uuid is not None
+                    and request.current_uuid != registered_uuid
+                ):
                     return RegistrationResult(
                         STATUS_IDENTITY_REJECTED,
                         ZERO_UUID,
                         server_uuid,
-                        "stored_uuid_not_registered_for_mac",
+                        "stored_uuid_does_not_match_device",
                     )
 
-                registration_id, node_uuid, approval_status = row
                 connection.execute(
                     """
-                    UPDATE node_registrations
-                    SET last_seen_at = now(),
-                        revision = revision + 1
+                    UPDATE public.node_registrations
+                    SET last_seen_at = now()
                     WHERE registration_id = %s
                     """,
                     (registration_id,),
                 )
+                sync_identification(connection, request.device_id, ble_address)
 
-                if approval_status == "pending":
+                if approval_status != "approved":
                     return RegistrationResult(
-                        STATUS_PENDING_APPROVAL,
+                        STATUS_SERVER_REJECTED,
                         ZERO_UUID,
                         server_uuid,
-                        "pending_admin_approval",
+                        f"registration_{approval_status}",
                     )
-                if approval_status == "rejected":
+
+                if token_hash is None or token_issued_at is None:
                     return RegistrationResult(
-                        STATUS_ADMIN_REJECTED,
+                        STATUS_ERROR,
                         ZERO_UUID,
                         server_uuid,
-                        "rejected_by_admin",
+                        "approved_registration_missing_token",
                     )
 
                 return RegistrationResult(
-                    STATUS_EXISTING_ACCEPTED,
-                    node_uuid,
+                    STATUS_EXISTING_ACCEPTED
+                    if request.current_uuid is not None
+                    else STATUS_NEW_ASSIGNED,
+                    registered_uuid,
                     server_uuid,
-                    "verified",
+                    "approved",
                 )
 
-            if row is None:
-                assigned_uuid = uuid.uuid4()
-                connection.execute(
-                    """
-                    INSERT INTO node_registrations(
-                        device_id,
-                        node_uuid,
-                        active,
-                        approval_status,
-                        requested_at,
-                        last_seen_at
-                    )
-                    VALUES (%s, %s, TRUE, 'pending', now(), now())
-                    """,
-                    (request.device_id, assigned_uuid),
-                )
-                return RegistrationResult(
-                    STATUS_PENDING_APPROVAL,
-                    ZERO_UUID,
-                    server_uuid,
-                    "pending_admin_approval",
-                )
+            assigned_uuid = request.current_uuid or uuid.uuid4()
 
-            registration_id, assigned_uuid, approval_status = row
-            connection.execute(
+            existing_uuid_row = connection.execute(
                 """
-                UPDATE node_registrations
-                SET requested_at = now(),
-                    last_seen_at = now(),
-                    revision = revision + 1
-                WHERE registration_id = %s
-                """,
-                (registration_id,),
-            )
-
-            if approval_status == "pending":
-                return RegistrationResult(
-                    STATUS_PENDING_APPROVAL,
-                    ZERO_UUID,
-                    server_uuid,
-                    "pending_admin_approval",
-                )
-            if approval_status == "rejected":
-                return RegistrationResult(
-                    STATUS_ADMIN_REJECTED,
-                    ZERO_UUID,
-                    server_uuid,
-                    "rejected_by_admin",
-                )
-
-            return RegistrationResult(
-                STATUS_NEW_ASSIGNED,
-                assigned_uuid,
-                server_uuid,
-                "approved_identity_assigned",
-            )
-
-
-def registered_nodes() -> list[dict[str, str]]:
-    with psycopg.connect(DATABASE_URL) as connection:
-        rows = connection.execute(
-            """
-            SELECT device_id, node_uuid
-            FROM node_registrations
-            WHERE active = TRUE
-              AND approval_status = 'approved'
-            ORDER BY device_id
-            """
-        ).fetchall()
-
-    return [
-        {"device_id": row[0], "node_uuid": str(row[1])}
-        for row in rows
-    ]
-
-
-def list_admin_nodes(status: str) -> list[dict[str, Any]]:
-    if status not in ADMIN_STATUSES:
-        raise ValueError("invalid registration status")
-
-    status_clause = "" if status == "all" else "AND approval_status = %s"
-    parameters: tuple[Any, ...] = () if status == "all" else (status,)
-
-    columns = (
-        "registration_id",
-        "device_id",
-        "node_uuid",
-        "approval_status",
-        "active",
-        "requested_at",
-        "registered_at",
-        "last_seen_at",
-        "decided_at",
-        "decided_by",
-        "decision_reason",
-        "revision",
-    )
-
-    with psycopg.connect(DATABASE_URL) as connection:
-        rows = connection.execute(
-            f"""
-            SELECT
-                registration_id,
-                device_id,
-                node_uuid,
-                approval_status,
-                active,
-                requested_at,
-                registered_at,
-                last_seen_at,
-                decided_at,
-                decided_by,
-                decision_reason,
-                revision
-            FROM node_registrations
-            WHERE active = TRUE
-            {status_clause}
-            ORDER BY requested_at DESC, registration_id DESC
-            """,
-            parameters,
-        ).fetchall()
-
-    return [row_to_dict(columns, row) for row in rows]
-
-
-def decide_node(
-    device_id: str,
-    new_status: str,
-    actor: str,
-    reason: str | None,
-) -> dict[str, Any]:
-    if new_status not in {"approved", "rejected"}:
-        raise ValueError("decision must be approved or rejected")
-
-    with psycopg.connect(DATABASE_URL) as connection:
-        with connection.transaction():
-            row = connection.execute(
-                """
-                SELECT
-                    registration_id,
-                    node_uuid,
-                    approval_status
-                FROM node_registrations
-                WHERE device_id = %s
-                  AND active = TRUE
+                SELECT registration_id, device_id, active
+                FROM public.node_registrations
+                WHERE node_uuid = %s
                 FOR UPDATE
                 """,
-                (device_id,),
+                (assigned_uuid,),
             ).fetchone()
 
-            if row is None:
-                raise LookupError("active registration not found")
+            if existing_uuid_row is not None:
+                registration_id, owner_device_id, owner_active = existing_uuid_row
+                if owner_device_id != request.device_id:
+                    return RegistrationResult(
+                        STATUS_IDENTITY_REJECTED,
+                        ZERO_UUID,
+                        server_uuid,
+                        "stored_uuid_belongs_to_other_device",
+                    )
+                if owner_active:
+                    return RegistrationResult(
+                        STATUS_ERROR,
+                        ZERO_UUID,
+                        server_uuid,
+                        "registration_state_inconsistent",
+                    )
 
-            registration_id, node_uuid, previous_status = row
-
-            if previous_status == new_status:
-                return {
-                    "device_id": device_id,
-                    "node_uuid": str(node_uuid),
-                    "previous_status": previous_status,
-                    "approval_status": new_status,
-                    "actor": actor,
-                    "reason": reason or None,
-                    "changed": False,
-                }
-
-            connection.execute(
-                """
-                UPDATE node_registrations
-                SET approval_status = %s,
-                    decided_at = now(),
-                    decided_by = %s,
-                    decision_reason = %s,
-                    revision = revision + 1
-                WHERE registration_id = %s
-                """,
-                (
-                    new_status,
-                    actor,
-                    reason or None,
-                    registration_id,
-                ),
-            )
-
-            connection.execute(
-                """
-                INSERT INTO registration_decision_audit(
-                    registration_id,
-                    device_id,
-                    node_uuid,
-                    previous_status,
-                    new_status,
-                    actor,
-                    reason
+                connection.execute(
+                    """
+                    UPDATE public.node_registrations
+                    SET active = TRUE,
+                        approval_status = 'pending',
+                        token_hash = NULL,
+                        token_issued_at = NULL,
+                        token_revoked_at = NULL,
+                        requested_at = now(),
+                        last_seen_at = now(),
+                        decided_at = NULL,
+                        decided_by = NULL,
+                        decision_reason = NULL,
+                        delinked_at = NULL
+                    WHERE registration_id = %s
+                    """,
+                    (registration_id,),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
+                add_audit(
+                    connection,
+                    int(registration_id),
+                    request.device_id,
+                    None,
+                    "pending",
+                    "ble-registration",
+                    "inactive registration reactivated",
+                )
+            else:
+                row = connection.execute(
+                    """
+                    INSERT INTO public.node_registrations (
+                        device_id,
+                        node_uuid,
+                        approval_status,
+                        active,
+                        requested_at,
+                        registered_at,
+                        last_seen_at
+                    )
+                    VALUES (%s, %s, 'pending', TRUE, now(), now(), now())
+                    RETURNING registration_id
+                    """,
+                    (request.device_id, assigned_uuid),
+                ).fetchone()
+                registration_id = int(row[0])
+                add_audit(
+                    connection,
                     registration_id,
-                    device_id,
-                    node_uuid,
-                    previous_status,
-                    new_status,
-                    actor,
-                    reason or None,
-                ),
+                    request.device_id,
+                    None,
+                    "pending",
+                    "ble-registration",
+                    "new BLE registration request",
+                )
+
+            sync_identification(connection, request.device_id, ble_address)
+
+            return RegistrationResult(
+                STATUS_SERVER_REJECTED,
+                ZERO_UUID,
+                server_uuid,
+                "registration_pending",
             )
 
-    return {
-        "device_id": device_id,
-        "node_uuid": str(node_uuid),
-        "previous_status": previous_status,
-        "approval_status": new_status,
-        "actor": actor,
-        "reason": reason or None,
-        "changed": True,
-    }
 
-
-def node_details(device_id: str) -> dict[str, Any] | None:
-    columns = (
-        "registration_id",
-        "device_id",
-        "node_uuid",
-        "approval_status",
-        "active",
-        "requested_at",
-        "registered_at",
-        "last_seen_at",
-        "decided_at",
-        "decided_by",
-        "decision_reason",
-        "revision",
-    )
-
+def token_for_device(token_secret: bytes, device_id: str) -> str | None:
     with psycopg.connect(DATABASE_URL) as connection:
         row = connection.execute(
             """
             SELECT
                 registration_id,
-                device_id,
                 node_uuid,
                 approval_status,
-                active,
-                requested_at,
-                registered_at,
-                last_seen_at,
-                decided_at,
-                decided_by,
-                decision_reason,
-                revision
-            FROM node_registrations
+                token_hash,
+                token_issued_at
+            FROM public.node_registrations
             WHERE device_id = %s
               AND active = TRUE
             """,
             (device_id,),
         ).fetchone()
 
-        if row is None:
-            return None
-
-        details = row_to_dict(columns, row)
-        audit_rows = connection.execute(
-            """
-            SELECT
-                previous_status,
-                new_status,
-                actor,
-                reason,
-                decided_at
-            FROM registration_decision_audit
-            WHERE registration_id = %s
-            ORDER BY decided_at DESC
-            """,
-            (details["registration_id"],),
-        ).fetchall()
-
-    details["audit"] = [
-        {
-            "previous_status": audit[0],
-            "new_status": audit[1],
-            "actor": audit[2],
-            "reason": audit[3],
-            "decided_at": audit[4].isoformat(),
-        }
-        for audit in audit_rows
-    ]
-    return details
-
-
-def peer_ip(request: web.Request) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    """Return the direct TCP peer address.
-
-    Forwarded headers are intentionally ignored. Local-only mode must not be
-    bypassable by sending a forged X-Forwarded-For header.
-    """
-    transport = request.transport
-    if transport is None:
+    if row is None:
         return None
 
-    peer = transport.get_extra_info("peername")
-    if peer is None:
+    registration_id, node_uuid, status, token_hash, token_issued_at = row
+    if status != "approved" or token_hash is None or token_issued_at is None:
         return None
 
-    raw_host = peer[0] if isinstance(peer, tuple) else str(peer)
-    try:
-        address = ipaddress.ip_address(raw_host)
-    except ValueError:
+    token = derive_bearer_token(
+        token_secret,
+        int(registration_id),
+        device_id,
+        node_uuid,
+        token_issued_at,
+    )
+    if not hmac.compare_digest(hash_bearer_token(token), str(token_hash)):
+        logger.error("Stored token hash does not match derived token for %s", device_id)
         return None
-
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        return address.ipv4_mapped
-    return address
+    return token
 
 
-def is_local_request(request: web.Request) -> bool:
-    address = peer_ip(request)
-    return address is not None and address.is_loopback
+def registration_payload(row: tuple[Any, ...]) -> dict[str, Any]:
+    (
+        registration_id,
+        device_id,
+        node_uuid,
+        approval_status,
+        active,
+        requested_at,
+        registered_at,
+        last_seen_at,
+        decided_at,
+        decided_by,
+        decision_reason,
+        token_hash,
+        token_issued_at,
+        token_revoked_at,
+        last_authenticated_at,
+        last_auth_failure_at,
+        delinked_at,
+    ) = row
+
+    def iso(value: Any) -> str | None:
+        return value.isoformat() if value is not None else None
+
+    return {
+        "registration_id": int(registration_id),
+        "device_id": str(device_id),
+        "node_uuid": str(node_uuid),
+        "approval_status": str(approval_status),
+        "active": bool(active),
+        "token_issued": token_hash is not None,
+        "requested_at": iso(requested_at),
+        "registered_at": iso(registered_at),
+        "last_seen_at": iso(last_seen_at),
+        "decided_at": iso(decided_at),
+        "decided_by": decided_by,
+        "decision_reason": decision_reason,
+        "token_issued_at": iso(token_issued_at),
+        "token_revoked_at": iso(token_revoked_at),
+        "last_authenticated_at": iso(last_authenticated_at),
+        "last_auth_failure_at": iso(last_auth_failure_at),
+        "delinked_at": iso(delinked_at),
+    }
 
 
-@web.middleware
-async def admin_auth(
-    request: web.Request,
-    handler: Handler,
-) -> web.StreamResponse:
-    if not request.path.startswith("/v1/admin/"):
-        return await handler(request)
-
-    # A configured token enables authenticated access from any interface on
-    # which the HTTP server is listening.
-    if ADMIN_TOKEN:
-        supplied = request.headers.get("Authorization", "")
-        expected = f"Bearer {ADMIN_TOKEN}"
-        if not hmac.compare_digest(supplied, expected):
-            return web.json_response(
-                {
-                    "error": "unauthorized",
-                    "detail": "A valid bearer token is required",
-                },
-                status=401,
-            )
-        return await handler(request)
-
-    # A blank token does not disable the API. It places it in local-only mode.
-    if not is_local_request(request):
-        address = peer_ip(request)
-        logger.warning(
-            "Denied tokenless admin request path=%s peer=%s",
-            request.path,
-            address,
-        )
-        return web.json_response(
-            {
-                "error": "local_admin_only",
-                "detail": (
-                    "REGISTRATION_ADMIN_TOKEN is blank; admin requests "
-                    "are accepted only from 127.0.0.1 or ::1"
-                ),
-            },
-            status=403,
-        )
-
-    return await handler(request)
+REGISTRATION_SELECT = """
+SELECT
+    registration_id,
+    device_id,
+    node_uuid,
+    approval_status,
+    active,
+    requested_at,
+    registered_at,
+    last_seen_at,
+    decided_at,
+    decided_by,
+    decision_reason,
+    token_hash,
+    token_issued_at,
+    token_revoked_at,
+    last_authenticated_at,
+    last_auth_failure_at,
+    delinked_at
+FROM public.node_registrations
+"""
 
 
-class TervanixServer:
+class TervanixRegistrationServer:
     def __init__(self) -> None:
-        self.server_uuid = initialize_database()
+        validate_database_schema()
+        self.server_uuid = load_server_uuid()
+        self.token_secret = load_token_secret()
         self.ble: BlessServer | None = None
-        self.characteristic: BlessGATTCharacteristic | None = None
+        self.registration_characteristic: BlessGATTCharacteristic | None = None
+        self.credential_characteristic: BlessGATTCharacteristic | None = None
+        self.central_devices: dict[str, str] = {}
         self.stop_event = asyncio.Event()
-        self.http_runner: web.AppRunner | None = None
         self.ble_started = False
+        self.admin_runner: web.AppRunner | None = None
 
     @staticmethod
     def _central_id(request: Any | None) -> str | None:
         if request is None:
             return None
         try:
-            return request.get("central_id")
+            value = request.get("central_id")
         except (AttributeError, TypeError):
-            return getattr(request, "central_id", None)
+            value = getattr(request, "central_id", None)
+        return str(value) if value else None
 
     def read_request(
         self,
@@ -767,9 +707,40 @@ class TervanixServer:
         **kwargs: Any,
     ) -> bytearray:
         del kwargs
-        logger.info(
-            "BLE registration response read central=%s bytes=%d",
-            self._central_id(request),
+        central_id = self._central_id(request)
+        characteristic_uuid = str(characteristic.uuid).lower()
+
+        if characteristic_uuid == CREDENTIAL_UUID.lower():
+            if central_id is None:
+                logger.warning("Credential read without central_id")
+                return bytearray()
+
+            device_id = self.central_devices.get(central_id)
+            if device_id is None:
+                logger.warning("Credential read from unregistered central=%s", central_id)
+                return bytearray()
+
+            token = token_for_device(self.token_secret, device_id)
+            if token is None:
+                logger.info(
+                    "Credential unavailable central=%s device_id=%s",
+                    central_id,
+                    device_id,
+                )
+                return bytearray()
+
+            logger.info(
+                "Provisioning MQTT bearer token central=%s device_id=%s bytes=%d",
+                central_id,
+                device_id,
+                len(token),
+            )
+            return bytearray(token.encode("ascii"))
+
+        logger.debug(
+            "BLE read central=%s characteristic=%s bytes=%d",
+            central_id,
+            characteristic.uuid,
             len(characteristic.value),
         )
         return characteristic.value
@@ -783,7 +754,6 @@ class TervanixServer:
     ) -> None:
         del kwargs
         central_id = self._central_id(request)
-        registration: RegistrationRequest | None = None
 
         if str(characteristic.uuid).lower() != REGISTRATION_UUID.lower():
             logger.warning(
@@ -793,8 +763,12 @@ class TervanixServer:
             )
             return
 
+        registration: RegistrationRequest | None = None
         try:
-            registration = parse_request(bytes(value))
+            registration = parse_registration_request(bytes(value))
+            if central_id is not None:
+                self.central_devices[central_id] = registration.device_id
+
             logger.info(
                 "BLE registration request central=%s device_id=%s "
                 "current_uuid=%s expected_server_uuid=%s nonce=%u",
@@ -805,20 +779,25 @@ class TervanixServer:
                 registration.nonce,
             )
 
-            result = register_or_verify(registration, self.server_uuid)
+            result = register_or_verify(
+                registration,
+                self.server_uuid,
+                central_id,
+            )
             characteristic.value = bytearray(
-                build_response(result, registration.nonce)
+                build_registration_response(result, registration.nonce)
             )
 
             logger.info(
                 "BLE registration response central=%s status=%d reason=%s "
-                "node_uuid=%s server_uuid=%s nonce=%u",
+                "node_uuid=%s server_uuid=%s nonce=%u bytes=%d",
                 central_id,
                 result.status,
                 result.reason,
                 result.node_uuid,
                 result.server_uuid,
                 registration.nonce,
+                RESPONSE_SIZE,
             )
         except Exception:
             logger.exception("BLE registration failed central=%s", central_id)
@@ -829,198 +808,14 @@ class TervanixServer:
                 "invalid_request",
             )
             characteristic.value = bytearray(
-                build_response(result, registration.nonce if registration else 0)
+                build_registration_response(
+                    result,
+                    registration.nonce if registration else 0,
+                )
             )
-
-    async def http_register(self, request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-            registration = RegistrationRequest(
-                device_id=normalize_device_id(body["device_id"]),
-                current_uuid=optional_uuid(body.get("current_uuid")),
-                expected_server_uuid=optional_uuid(body.get("server_uuid")),
-                nonce=int(body.get("nonce", 0)),
-            )
-            result = await asyncio.to_thread(
-                register_or_verify,
-                registration,
-                self.server_uuid,
-            )
-        except (
-            KeyError,
-            ValueError,
-            TypeError,
-            json.JSONDecodeError,
-        ) as error:
-            return web.json_response(
-                {
-                    "status": STATUS_ERROR,
-                    "reason": str(error),
-                    "server_uuid": str(self.server_uuid),
-                },
-                status=400,
-            )
-
-        payload = {
-            "protocol_version": PROTOCOL_VERSION,
-            "status": result.status,
-            "reason": result.reason,
-            "node_uuid": (
-                None if result.node_uuid.int == 0 else str(result.node_uuid)
-            ),
-            "server_uuid": str(result.server_uuid),
-            "nonce": registration.nonce,
-        }
-
-        if result.status in (STATUS_EXISTING_ACCEPTED, STATUS_NEW_ASSIGNED):
-            http_status = 200
-        elif result.status == STATUS_PENDING_APPROVAL:
-            http_status = 202
-        else:
-            http_status = 403
-
-        return web.json_response(payload, status=http_status)
-
-    async def http_registry(self, request: web.Request) -> web.Response:
-        try:
-            authentication = RegistrationRequest(
-                device_id=normalize_device_id(
-                    request.headers.get("X-Tervanix-Device-ID", "")
-                ),
-                current_uuid=optional_uuid(
-                    request.headers.get("X-Tervanix-Node-UUID")
-                ),
-                expected_server_uuid=optional_uuid(
-                    request.headers.get("X-Tervanix-Server-UUID")
-                ),
-                nonce=0,
-            )
-            result = await asyncio.to_thread(
-                register_or_verify,
-                authentication,
-                self.server_uuid,
-            )
-        except (ValueError, TypeError) as error:
-            return web.json_response(
-                {"status": STATUS_ERROR, "reason": str(error)},
-                status=400,
-            )
-
-        if result.status != STATUS_EXISTING_ACCEPTED:
-            return web.json_response(
-                {"status": result.status, "reason": result.reason},
-                status=403,
-            )
-
-        nodes = await asyncio.to_thread(registered_nodes)
-        return web.json_response(
-            {
-                "protocol_version": PROTOCOL_VERSION,
-                "server_uuid": str(self.server_uuid),
-                "registry_version": len(nodes),
-                "nodes": nodes,
-            }
-        )
-
-    async def admin_list(self, request: web.Request) -> web.Response:
-        status = request.query.get("status", "pending")
-        if status not in ADMIN_STATUSES:
-            return web.json_response(
-                {
-                    "error": "invalid_status",
-                    "allowed": sorted(ADMIN_STATUSES),
-                },
-                status=400,
-            )
-
-        nodes = await asyncio.to_thread(list_admin_nodes, status)
-        return web.json_response(
-            {
-                "status_filter": status,
-                "count": len(nodes),
-                "nodes": nodes,
-            }
-        )
-
-    async def admin_show(self, request: web.Request) -> web.Response:
-        try:
-            device_id = normalize_device_id(request.match_info["device_id"])
-        except ValueError as error:
-            return web.json_response(
-                {"error": "invalid_device_id", "detail": str(error)},
-                status=400,
-            )
-
-        result = await asyncio.to_thread(node_details, device_id)
-        if result is None:
-            return web.json_response({"error": "not_found"}, status=404)
-        return web.json_response(result)
-
-    async def admin_decide(self, request: web.Request) -> web.Response:
-        try:
-            device_id = normalize_device_id(request.match_info["device_id"])
-        except ValueError as error:
-            return web.json_response(
-                {"error": "invalid_device_id", "detail": str(error)},
-                status=400,
-            )
-
-        action = request.match_info["action"]
-        new_status = DECISION_ACTIONS.get(action)
-        if new_status is None:
-            return web.json_response(
-                {
-                    "error": "invalid_action",
-                    "allowed": sorted(DECISION_ACTIONS),
-                },
-                status=400,
-            )
-
-        try:
-            body = await request.json()
-        except json.JSONDecodeError:
-            body = {}
-
-        actor = str(body.get("actor", "local-admin")).strip() or "local-admin"
-        reason = str(body.get("reason", "")).strip()
-
-        try:
-            result = await asyncio.to_thread(
-                decide_node,
-                device_id,
-                new_status,
-                actor,
-                reason,
-            )
-        except LookupError:
-            return web.json_response({"error": "not_found"}, status=404)
-
-        logger.info(
-            "Admin decision action=%s device=%s actor=%s reason=%s peer=%s",
-            action,
-            device_id,
-            actor,
-            reason,
-            peer_ip(request),
-        )
-        return web.json_response(result)
-
-    async def health(self, request: web.Request) -> web.Response:
-        del request
-        return web.json_response(
-            {
-                "ok": True,
-                "server_uuid": str(self.server_uuid),
-                "protocol_version": PROTOCOL_VERSION,
-                "admin_mode": "token" if ADMIN_TOKEN else "local-only",
-            }
-        )
 
     async def configure_ble(self) -> None:
-        self.ble = BlessServer(
-            name=SERVER_NAME,
-            loop=asyncio.get_running_loop(),
-        )
+        self.ble = BlessServer(name=SERVER_NAME, loop=asyncio.get_running_loop())
         self.ble.read_request_func = self.read_request
         self.ble.write_request_func = self.write_request
 
@@ -1028,84 +823,323 @@ class TervanixServer:
         await self.ble.add_new_characteristic(
             SERVICE_UUID,
             REGISTRATION_UUID,
-            (
-                GATTCharacteristicProperties.read
-                | GATTCharacteristicProperties.write
-            ),
+            GATTCharacteristicProperties.read | GATTCharacteristicProperties.write,
             bytearray(RESPONSE_SIZE),
-            (
-                GATTAttributePermissions.readable
-                | GATTAttributePermissions.writable
-            ),
+            GATTAttributePermissions.readable | GATTAttributePermissions.writable,
+        )
+        await self.ble.add_new_characteristic(
+            SERVICE_UUID,
+            CREDENTIAL_UUID,
+            GATTCharacteristicProperties.read,
+            bytearray(),
+            GATTAttributePermissions.readable,
         )
 
-        self.characteristic = self.ble.get_characteristic(REGISTRATION_UUID)
-        if self.characteristic is None:
-            raise RuntimeError("Registration characteristic was not created")
+        self.registration_characteristic = self.ble.get_characteristic(
+            REGISTRATION_UUID
+        )
+        self.credential_characteristic = self.ble.get_characteristic(CREDENTIAL_UUID)
+        if self.registration_characteristic is None or self.credential_characteristic is None:
+            raise RuntimeError("Registration/credential characteristic was not created")
 
-    async def start_http(self) -> None:
-        application = web.Application(
-            client_max_size=16 * 1024,
-            middlewares=[admin_auth],
-        )
-        application.router.add_post("/v1/register", self.http_register)
-        application.router.add_get("/v1/registry", self.http_registry)
-        application.router.add_get("/v1/admin/nodes", self.admin_list)
-        application.router.add_get(
-            "/v1/admin/nodes/{device_id}",
-            self.admin_show,
-        )
-        application.router.add_post(
-            "/v1/admin/nodes/{device_id}/{action}",
-            self.admin_decide,
-        )
-        application.router.add_get("/health", self.health)
+    def _require_admin(self, request: web.Request) -> None:
+        if ADMIN_TOKEN:
+            authorization = request.headers.get("Authorization", "")
+            expected = f"Bearer {ADMIN_TOKEN}"
+            if not hmac.compare_digest(authorization, expected):
+                raise web.HTTPUnauthorized(
+                    text=json.dumps({"error": "invalid_admin_token"}),
+                    content_type="application/json",
+                )
+            return
 
-        self.http_runner = web.AppRunner(application)
-        await self.http_runner.setup()
-        site = web.TCPSite(self.http_runner, HTTP_HOST, HTTP_PORT)
-        await site.start()
+        remote = request.remote
+        try:
+            is_loopback = bool(remote and ipaddress.ip_address(remote).is_loopback)
+        except ValueError:
+            is_loopback = False
+        if not is_loopback:
+            raise web.HTTPForbidden(
+                text=json.dumps(
+                    {"error": "admin_api_is_local_only_without_token"}
+                ),
+                content_type="application/json",
+            )
+
+    async def health(self, request: web.Request) -> web.Response:
+        del request
+        with psycopg.connect(DATABASE_URL) as connection:
+            counts = connection.execute(
+                """
+                SELECT approval_status, count(*)
+                FROM public.node_registrations
+                WHERE active = TRUE
+                GROUP BY approval_status
+                """
+            ).fetchall()
+        return web.json_response(
+            {
+                "status": "ok",
+                "server_uuid": str(self.server_uuid),
+                "ble": self.ble_started,
+                "admin_mode": "token" if ADMIN_TOKEN else "local-only",
+                "registrations": {str(status): int(count) for status, count in counts},
+            }
+        )
+
+    async def list_nodes(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        status = request.query.get("status", "pending").lower()
+        if status not in {*VALID_APPROVAL_STATUSES, "all"}:
+            raise web.HTTPBadRequest(
+                text=json.dumps({"error": "invalid_status"}),
+                content_type="application/json",
+            )
+
+        sql = REGISTRATION_SELECT + " WHERE active = TRUE"
+        parameters: tuple[Any, ...] = ()
+        if status != "all":
+            sql += " AND approval_status = %s"
+            parameters = (status,)
+        sql += " ORDER BY requested_at DESC, registration_id DESC"
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return web.json_response({"nodes": [registration_payload(row) for row in rows]})
+
+    async def show_node(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        try:
+            device_id = normalize_device_id(request.match_info["device_id"])
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            row = connection.execute(
+                REGISTRATION_SELECT
+                + " WHERE device_id = %s AND active = TRUE ORDER BY registration_id DESC LIMIT 1",
+                (device_id,),
+            ).fetchone()
+            if row is None:
+                raise web.HTTPNotFound(
+                    text=json.dumps({"error": "registration_not_found"}),
+                    content_type="application/json",
+                )
+
+            audit_rows = connection.execute(
+                """
+                SELECT
+                    audit_id,
+                    previous_status,
+                    new_status,
+                    actor,
+                    reason,
+                    created_at
+                FROM devices.registration_audit
+                WHERE registration_id = %s
+                ORDER BY created_at ASC, audit_id ASC
+                """,
+                (row[0],),
+            ).fetchall()
+
+        payload = registration_payload(row)
+        payload["audit"] = [
+            {
+                "audit_id": int(audit_id),
+                "previous_status": previous_status,
+                "new_status": new_status,
+                "actor": actor,
+                "reason": reason,
+                "created_at": created_at.isoformat(),
+            }
+            for (
+                audit_id,
+                previous_status,
+                new_status,
+                actor,
+                reason,
+                created_at,
+            ) in audit_rows
+        ]
+        return web.json_response(payload)
+
+    async def decide_node(self, request: web.Request) -> web.Response:
+        self._require_admin(request)
+        try:
+            device_id = normalize_device_id(request.match_info["device_id"])
+        except ValueError as error:
+            raise web.HTTPBadRequest(text=str(error)) from error
+
+        decision = request.match_info["decision"].lower()
+        if decision not in {"approve", "reject"}:
+            raise web.HTTPNotFound()
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            body = {}
+        actor = str(body.get("actor") or "admin")[:200]
+        reason = str(body.get("reason") or "")[:1000] or None
+        new_status = "approved" if decision == "approve" else "rejected"
+
+        with psycopg.connect(DATABASE_URL) as connection:
+            with connection.transaction():
+                row = connection.execute(
+                    """
+                    SELECT
+                        registration_id,
+                        node_uuid,
+                        approval_status,
+                        token_issued_at
+                    FROM public.node_registrations
+                    WHERE device_id = %s
+                      AND active = TRUE
+                    FOR UPDATE
+                    """,
+                    (device_id,),
+                ).fetchone()
+                if row is None:
+                    raise web.HTTPNotFound(
+                        text=json.dumps({"error": "registration_not_found"}),
+                        content_type="application/json",
+                    )
+
+                registration_id, node_uuid, previous_status, existing_issued_at = row
+
+                if new_status == "approved":
+                    if previous_status == "approved" and existing_issued_at is not None:
+                        # Idempotent approve: do not rotate a live device's token.
+                        pass
+                    else:
+                        issued_at = datetime.now(timezone.utc)
+                        token = derive_bearer_token(
+                            self.token_secret,
+                            int(registration_id),
+                            device_id,
+                            node_uuid,
+                            issued_at,
+                        )
+                        token_hash = hash_bearer_token(token)
+                        connection.execute(
+                            """
+                            UPDATE public.node_registrations
+                            SET approval_status = 'approved',
+                                token_hash = %s,
+                                token_issued_at = %s,
+                                token_revoked_at = NULL,
+                                decided_at = now(),
+                                decided_by = %s,
+                                decision_reason = %s
+                            WHERE registration_id = %s
+                            """,
+                            (
+                                token_hash,
+                                issued_at,
+                                actor,
+                                reason,
+                                registration_id,
+                            ),
+                        )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE public.node_registrations
+                        SET approval_status = 'rejected',
+                            token_hash = NULL,
+                            token_issued_at = NULL,
+                            token_revoked_at = NULL,
+                            decided_at = now(),
+                            decided_by = %s,
+                            decision_reason = %s
+                        WHERE registration_id = %s
+                        """,
+                        (actor, reason, registration_id),
+                    )
+
+                if previous_status != new_status:
+                    add_audit(
+                        connection,
+                        int(registration_id),
+                        device_id,
+                        str(previous_status),
+                        new_status,
+                        actor,
+                        reason,
+                    )
+
+                updated = connection.execute(
+                    REGISTRATION_SELECT + " WHERE registration_id = %s",
+                    (registration_id,),
+                ).fetchone()
 
         logger.info(
-            "Wi-Fi registration API listening on %s:%d; admin_mode=%s",
-            HTTP_HOST,
-            HTTP_PORT,
+            "Admin decision device_id=%s %s -> %s actor=%s",
+            device_id,
+            previous_status,
+            new_status,
+            actor,
+        )
+        return web.json_response(registration_payload(updated))
+
+    async def start_admin_api(self) -> None:
+        app = web.Application()
+        app.router.add_get("/health", self.health)
+        app.router.add_get("/v1/admin/nodes", self.list_nodes)
+        app.router.add_get("/v1/admin/nodes/{device_id}", self.show_node)
+        app.router.add_post(
+            "/v1/admin/nodes/{device_id}/{decision:approve|reject}",
+            self.decide_node,
+        )
+
+        self.admin_runner = web.AppRunner(app)
+        await self.admin_runner.setup()
+        site = web.TCPSite(self.admin_runner, ADMIN_HOST, ADMIN_PORT)
+        await site.start()
+        logger.info(
+            "Admin API listening on %s:%d; admin_mode=%s",
+            ADMIN_HOST,
+            ADMIN_PORT,
             "token" if ADMIN_TOKEN else "local-only",
         )
 
     async def run(self) -> None:
+        await self.start_admin_api()
         await self.configure_ble()
-        await self.start_http()
-
         if self.ble is None:
             raise RuntimeError("BLE server is not configured")
 
         try:
             await self.ble.start()
             self.ble_started = True
-            logger.info("BLE registration server started as %s", SERVER_NAME)
+            logger.info(
+                "BLE registration server started as %s; server_uuid=%s; "
+                "request_bytes=%d response_bytes=%d credential_uuid=%s",
+                SERVER_NAME,
+                self.server_uuid,
+                REQUEST_SIZE,
+                RESPONSE_SIZE,
+                CREDENTIAL_UUID,
+            )
             await self.stop_event.wait()
         finally:
             if self.ble_started:
                 logger.info("Stopping BLE registration server")
                 await self.ble.stop()
-            if self.http_runner is not None:
-                logger.info("Stopping HTTP registration server")
-                await self.http_runner.cleanup()
+            if self.admin_runner is not None:
+                await self.admin_runner.cleanup()
 
     def stop(self) -> None:
         self.stop_event.set()
 
 
 async def async_main() -> None:
-    application = TervanixServer()
+    application = TervanixRegistrationServer()
     loop = asyncio.get_running_loop()
 
     for received_signal in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(received_signal, application.stop)
         except NotImplementedError:
-            # add_signal_handler is not available on every event loop/platform.
             pass
 
     await application.run()
@@ -1124,7 +1158,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Stopped")
     except Exception:
-        logger.exception("Tervanix registration server failed")
+        logger.exception("Tervanix BLE registration server failed")
         raise SystemExit(1)
 
 

@@ -1,5 +1,8 @@
 aiohttp>=3.10,<4
+asyncpg>=0.30,<1
 bless>=0.2,<1
+cryptography>=43,<47
 dbus-next>=0.2,<1
+paho-mqtt>=2,<3
 psycopg[binary]>=3.2,<4
 python-dotenv>=1,<2
