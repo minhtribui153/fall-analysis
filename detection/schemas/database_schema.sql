@@ -154,14 +154,22 @@ CREATE TABLE "fall_detection"."activity_log" (
     "activity_id" bigserial PRIMARY KEY,
     "session_id" uuid NOT NULL,
     "worker_id" varchar(12) NOT NULL,
+    "prediction_sequence" bigint,
     "ts" timestamp with time zone NOT NULL,
-    "activity_state" varchar(20) NOT NULL,
+    "activity_state" varchar(24) NOT NULL,
+    "confidence" real,
+    "model_sha256" char(64),
+    "source" varchar(20) DEFAULT 'server_rules' NOT NULL,
     CONSTRAINT "activity_log_activity_state_check"
         CHECK (("activity_state")::text = ANY ((ARRAY[
             'stationary'::varchar,
             'walking'::varchar,
             'running'::varchar,
             'jumping'::varchar,
+            'falling_from_height'::varchar,
+            'near_miss'::varchar,
+            'slip'::varchar,
+            'trip'::varchar,
             'unknown'::varchar
         ])::text[]))
 );
@@ -171,8 +179,13 @@ CREATE TABLE "fall_detection"."classification" (
     "classification_id" bigserial PRIMARY KEY,
     "session_id" uuid NOT NULL,
     "worker_id" varchar(12) NOT NULL,
+    "prediction_sequence" bigint,
     "ts" timestamp with time zone NOT NULL,
     "event_type" varchar(20) NOT NULL,
+    "predicted_state" varchar(24),
+    "confidence" real,
+    "model_sha256" char(64),
+    "source" varchar(20) DEFAULT 'server_rules' NOT NULL,
     "fall_type" varchar(10),
     "max_smv" real,
     "max_rotation" real,
@@ -242,6 +255,12 @@ ON "monitoring"."readings" ("session_id", "ts");
 --> statement-breakpoint
 CREATE INDEX "idx_readings_device_ts"
 ON "monitoring"."readings" ("device_id", "ts");
+--> statement-breakpoint
+CREATE UNIQUE INDEX "activity_prediction_unique"
+ON "fall_detection"."activity_log" ("session_id", "prediction_sequence") WHERE "prediction_sequence" IS NOT NULL;
+--> statement-breakpoint
+CREATE UNIQUE INDEX "classification_prediction_unique"
+ON "fall_detection"."classification" ("session_id", "prediction_sequence", "source") WHERE "prediction_sequence" IS NOT NULL;
 --> statement-breakpoint
 CREATE INDEX "idx_activity_worker_ts"
 ON "fall_detection"."activity_log" ("worker_id", "ts");
@@ -327,6 +346,10 @@ SELECT
     c.ts,
     c.event_type,
     c.fall_type,
+    c.predicted_state,
+    c.confidence,
+    c.model_sha256,
+    c.source,
     c.max_smv,
     c.max_rotation,
     c.freefall_duration,
