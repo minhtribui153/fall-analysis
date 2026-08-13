@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "scripts": {
+    "dev:frontend": "pnpm --dir frontend dev",
+    "dev:backend": "pnpm --dir backend start:dev",
+    "frontend": "pnpm --dir frontend dev",
+    "backend": "pnpm --dir backend start:dev",
+    "dev": "concurrently \"pnpm run dev:backend\" \"pnpm run dev:frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4"
+  }
+}
+
