@@ -18,17 +18,20 @@ namespace tervanix::har
 namespace tervanix::mqtt
 {
     struct TelemetrySample {
-        sensor::ImuSample imu;
-        std::uint32_t sequence;
-        std::int64_t source_uptime_ms;
+        sensor::ImuSample imu{};
+        uint32_t sequence = 0;
+        int64_t source_uptime_ms = 0;
+        /** @brief Wall-clock timestamp to retain original time of
+         * flash-replayed samples captured, even across reboots. */
+        int64_t timestamp_ms = 0;
     };
 
     struct Stats {
-        std::uint64_t published_batches = 0;
-        std::uint64_t published_samples = 0;
-        std::uint64_t published_states = 0;
-        std::uint64_t publish_failures = 0;
-        std::int64_t last_publish_ms = 0;
+        uint64_t published_batches = 0;
+        uint64_t published_samples = 0;
+        uint64_t published_states = 0;
+        uint64_t publish_failures = 0;
+        int64_t last_publish_ms = 0;
     };
 
     /**

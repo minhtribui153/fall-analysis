@@ -1,15 +1,14 @@
 #pragma once
+
+#include <cstdint>
+
 #include "esp_err.h"
 #include "imu/imu_sensor.hpp"
 #include "model_manager.hpp"
-#include <cstdint>
 
-/**
- * @file har_inference.hpp
- * @brief Human Activity Recognisation (HAR) prediction system
- */
 namespace tervanix::har
 {
+
     struct Prediction {
         std::uint64_t prediction_sequence = 0;
         std::int64_t source_uptime_ms = 0;
@@ -37,4 +36,5 @@ namespace tervanix::har
     }
     inline bool ready() { return false; }
 #endif
+
 } // namespace tervanix::har

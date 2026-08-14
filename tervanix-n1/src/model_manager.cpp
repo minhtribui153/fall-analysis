@@ -6,19 +6,20 @@
 #include "esp_partition.h"
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
+#include "offline_store.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
 namespace
 {
     constexpr char TAG[] = "model";
     constexpr char STORAGE_LABEL[] = "storage";
-    constexpr std::uint8_t STORAGE_SUBTYPE = 0x82;
+    constexpr esp_partition_subtype_t STORAGE_SUBTYPE =
+        static_cast<esp_partition_subtype_t>(0x82);
     constexpr std::uint32_t HEADER_MAGIC = 0x31585654;
-    constexpr std::uint32_t HEADER_VERSION = 1;
+    constexpr std::uint32_t HEADER_VERSION = 2;
     constexpr std::size_t MODEL_OFFSET = 4096, IO_CHUNK = 2048,
                           MANIFEST_MAX = 4096;
     struct StoredHeader {
@@ -27,14 +28,30 @@ namespace
         char model_id[48];
         std::int32_t sample_rate_hz, window_samples, slide_samples, num_axes;
         float min_confidence;
+        std::int32_t inference_sample_period_ms;
+        std::int32_t inference_window_ms;
+        std::int32_t prediction_interval_ms;
+        std::int32_t offline_replay_batch_size;
+        std::uint8_t offline_purge_unknown_first;
+        std::uint8_t reserved[3];
     };
     struct Manifest {
         char model_id[48]{};
         char sha256[65]{};
         std::size_t size = 0;
-        int sample_rate_hz = 25, window_samples = 50, slide_samples = 25,
-            num_axes = 8;
+        int sample_rate_hz = 25;
+        int window_samples = 50;
+        int slide_samples = 25;
+        int num_axes = 8;
         float min_confidence = .60f;
+        int class_count = 0;
+        char classes[tervanix::model::MAX_CLASSES]
+                    [tervanix::model::MAX_CLASS_NAME]{};
+        int inference_sample_period_ms = 40;
+        int inference_window_ms = 1500;
+        int prediction_interval_ms = 1000;
+        int offline_replay_batch_size = 10;
+        bool offline_purge_unknown_first = true;
     };
     void uuid_text(
         const tervanix::identity::SessionUuid &v,
@@ -267,19 +284,62 @@ namespace
         auto *slide = cJSON_GetObjectItemCaseSensitive(d, "slide_samples");
         auto *axes = cJSON_GetObjectItemCaseSensitive(d, "num_axes");
         auto *conf = cJSON_GetObjectItemCaseSensitive(d, "min_confidence");
+        auto *classes = cJSON_GetObjectItemCaseSensitive(d, "classes");
+        auto *period =
+            cJSON_GetObjectItemCaseSensitive(d, "inference_sample_period_ms");
+        auto *acquisition =
+            cJSON_GetObjectItemCaseSensitive(d, "inference_window_ms");
+        auto *prediction_interval =
+            cJSON_GetObjectItemCaseSensitive(d, "prediction_interval_ms");
+        auto *replay_batch =
+            cJSON_GetObjectItemCaseSensitive(d, "offline_replay_batch_size");
+        auto *purge_unknown =
+            cJSON_GetObjectItemCaseSensitive(d, "offline_purge_unknown_first");
 
         bool ok = cJSON_IsString(id) && id->valuestring &&
                   cJSON_IsString(sha) && sha->valuestring &&
                   cJSON_IsNumber(size) && cJSON_IsNumber(sr) &&
                   cJSON_IsNumber(win) && cJSON_IsNumber(slide) &&
-                  cJSON_IsNumber(axes) && cJSON_IsNumber(conf);
+                  cJSON_IsNumber(axes) && cJSON_IsNumber(conf) &&
+                  cJSON_IsArray(classes) && cJSON_IsNumber(period) &&
+                  cJSON_IsNumber(acquisition) &&
+                  cJSON_IsNumber(prediction_interval) &&
+                  cJSON_IsNumber(replay_batch) && cJSON_IsBool(purge_unknown);
 
         if (ok)
         {
             ok = std::strlen(id->valuestring) < sizeof(mf.model_id) &&
                  std::strlen(sha->valuestring) == 64 && size->valuedouble > 0 &&
                  sr->valueint == 25 && win->valueint == 50 &&
-                 slide->valueint == 25 && axes->valueint == 8;
+                 axes->valueint == 8 && period->valueint >= 10 &&
+                 period->valueint <= 1000 &&
+                 acquisition->valueint >= period->valueint &&
+                 acquisition->valueint <= 5000 &&
+                 prediction_interval->valueint >= period->valueint &&
+                 prediction_interval->valueint <= 10000 &&
+                 replay_batch->valueint >= 1 && replay_batch->valueint <= 10;
+
+            const int manifest_class_count = cJSON_GetArraySize(classes);
+
+            ok = ok && manifest_class_count >= 1 &&
+                 manifest_class_count <= tervanix::model::MAX_CLASSES;
+
+            if (ok)
+            {
+                cJSON *class_item = nullptr;
+                cJSON_ArrayForEach(class_item, classes)
+                {
+                    if (!cJSON_IsString(class_item) ||
+                        !class_item->valuestring ||
+                        class_item->valuestring[0] == '\0' ||
+                        std::strlen(class_item->valuestring) >=
+                            tervanix::model::MAX_CLASS_NAME)
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
         }
 
         if (ok)
@@ -292,13 +352,29 @@ namespace
             mf.slide_samples = slide->valueint;
             mf.num_axes = axes->valueint;
             mf.min_confidence = static_cast<float>(conf->valuedouble);
+
+            mf.class_count = cJSON_GetArraySize(classes);
+            for (int i = 0; i < mf.class_count; ++i)
+            {
+                const cJSON *class_item = cJSON_GetArrayItem(classes, i);
+
+                std::strncpy(
+                    mf.classes[i],
+                    class_item->valuestring,
+                    tervanix::model::MAX_CLASS_NAME - 1);
+            }
+
+            mf.inference_sample_period_ms = period->valueint;
+            mf.inference_window_ms = acquisition->valueint;
+            mf.prediction_interval_ms = prediction_interval->valueint;
+            mf.offline_replay_batch_size = replay_batch->valueint;
+            mf.offline_purge_unknown_first = cJSON_IsTrue(purge_unknown);
         }
 
         cJSON_Delete(d);
         cJSON_Delete(root);
         return ok ? ESP_OK : ESP_ERR_INVALID_ARG;
     }
-
     const esp_partition_t *part()
     {
         return esp_partition_find_first(
@@ -363,8 +439,23 @@ namespace
         const tervanix::identity::SessionUuid &sid,
         const char *token)
     {
-        if (MODEL_OFFSET + m.size > p->size)
+        if (p->size <= tervanix::offline::RESERVED_BYTES + MODEL_OFFSET)
         {
+            ESP_LOGE(
+                TAG, "storage partition cannot fit model + offline reserve");
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        const std::size_t model_limit =
+            p->size - tervanix::offline::RESERVED_BYTES;
+        if (MODEL_OFFSET + m.size > model_limit)
+        {
+            ESP_LOGE(
+                TAG,
+                "model would overlap fixed offline store: model_end=%u "
+                "limit=%u",
+                static_cast<unsigned>(MODEL_OFFSET + m.size),
+                static_cast<unsigned>(model_limit));
             return ESP_ERR_INVALID_SIZE;
         }
 
@@ -475,6 +566,11 @@ namespace
         h.slide_samples = m.slide_samples;
         h.num_axes = m.num_axes;
         h.min_confidence = m.min_confidence;
+        h.inference_sample_period_ms = m.inference_sample_period_ms;
+        h.inference_window_ms = m.inference_window_ms;
+        h.prediction_interval_ms = m.prediction_interval_ms;
+        h.offline_replay_batch_size = m.offline_replay_batch_size;
+        h.offline_purge_unknown_first = m.offline_purge_unknown_first ? 1 : 0;
 
         ESP_RETURN_ON_ERROR(
             esp_partition_write(p, 0, &h, sizeof(h)),
@@ -497,13 +593,17 @@ namespace
     {
         auto *data = static_cast<std::uint8_t *>(std::malloc(m.size));
         if (!data)
+        {
             return ESP_ERR_NO_MEM;
-        esp_err_t rc = esp_partition_read(p, MODEL_OFFSET, data, m.size);
+        }
+
+        const esp_err_t rc = esp_partition_read(p, MODEL_OFFSET, data, m.size);
         if (rc != ESP_OK)
         {
             std::free(data);
             return rc;
         }
+
         out.data = data;
         out.size = m.size;
         std::strncpy(out.sha256, m.sha256, sizeof(out.sha256) - 1);
@@ -513,6 +613,21 @@ namespace
         out.slide_samples = m.slide_samples;
         out.num_axes = m.num_axes;
         out.min_confidence = m.min_confidence;
+        out.class_count = m.class_count;
+
+        for (int i = 0; i < m.class_count; ++i)
+        {
+            std::strncpy(
+                out.classes[i],
+                m.classes[i],
+                tervanix::model::MAX_CLASS_NAME - 1);
+        }
+
+        out.inference_sample_period_ms = m.inference_sample_period_ms;
+        out.inference_window_ms = m.inference_window_ms;
+        out.prediction_interval_ms = m.prediction_interval_ms;
+        out.offline_replay_batch_size = m.offline_replay_batch_size;
+        out.offline_purge_unknown_first = m.offline_purge_unknown_first;
         return ESP_OK;
     }
 } // namespace

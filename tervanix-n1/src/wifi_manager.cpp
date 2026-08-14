@@ -32,7 +32,7 @@ namespace
     void on_wifi_event(
         void *,
         esp_event_base_t event_base,
-        std::int32_t event_id,
+        int32_t event_id,
         void *event_data)
     {
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
@@ -167,6 +167,7 @@ namespace tervanix::wifi
             reinterpret_cast<char *>(wifi_config.sta.password),
             WIFI_PASSWORD,
             sizeof(wifi_config.sta.password) - 1);
+
         wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
         ESP_RETURN_ON_ERROR(
@@ -197,7 +198,7 @@ namespace tervanix::wifi
 
     bool is_connected() { return connected.load(); }
 
-    bool get_gateway_ip(char *out, std::size_t out_size)
+    bool get_gateway_ip(char *out, size_t out_size)
     {
         if (out == nullptr || out_size == 0 || !connected.load())
         {
@@ -207,7 +208,7 @@ namespace tervanix::wifi
         const int written =
             std::snprintf(out, out_size, IPSTR, IP2STR(&current_ip_info.gw));
 
-        return written > 0 && static_cast<std::size_t>(written) < out_size;
+        return written > 0 && static_cast<size_t>(written) < out_size;
     }
 
 } // namespace tervanix::wifi

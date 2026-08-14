@@ -9,11 +9,11 @@
 namespace tervanix::identity
 {
     /** @brief Stores a 16-byte node UUID. */
-    using NodeUuid = std::array<std::uint8_t, 16>; // Current worker UUID.
-    using SessionUuid = std::array<std::uint8_t, 16>;
-    inline constexpr std::size_t bearer_token_capacity = 64;
-    inline constexpr std::size_t worker_id_capacity = 13; // 12 + NUL
-    inline constexpr std::size_t worker_name_capacity =
+    using NodeUuid = std::array<uint8_t, 16>; // Current worker UUID.
+    using SessionUuid = std::array<uint8_t, 16>;
+    inline constexpr size_t bearer_token_capacity = 64;
+    inline constexpr size_t worker_id_capacity = 13; // 12 + NUL
+    inline constexpr size_t worker_name_capacity =
         65; // up to 16 UTF-8 chars + NUL
     using BearerToken = std::array<char, bearer_token_capacity>;
     using WorkerId = std::array<char, worker_id_capacity>;
@@ -70,7 +70,7 @@ namespace tervanix::identity
         const char *worker_id() const;
         const char *worker_name() const;
         const SessionUuid &session_id() const;
-        std::uint32_t token_expires_at() const;
+        uint32_t token_expires_at() const;
 
         /**
          * @brief Saves the node UUID if one is not already stored.
@@ -103,7 +103,7 @@ namespace tervanix::identity
         esp_err_t save_worker_context(
             const char *worker_id,
             const SessionUuid &session_id,
-            std::uint32_t token_expires_at);
+            uint32_t token_expires_at);
         esp_err_t save_worker_name(const char *worker_name);
 
         /**
@@ -138,7 +138,7 @@ namespace tervanix::identity
         WorkerId worker_id_{};
         WorkerName worker_name_{};
         SessionUuid session_id_{};
-        std::uint32_t token_expires_at_ = 0;
+        uint32_t token_expires_at_ = 0;
     };
 
 } // namespace tervanix::identity

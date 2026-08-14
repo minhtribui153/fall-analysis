@@ -12,7 +12,7 @@ namespace
 {
 
     constexpr char TAG[] = "imu";
-    constexpr std::uint8_t BMI270_I2C_ADDR = 0x68;
+    constexpr uint8_t BMI270_I2C_ADDR = 0x68;
 
     bmi270_handle_t *bmi270_handle = nullptr;
     bool imu_ready = false;

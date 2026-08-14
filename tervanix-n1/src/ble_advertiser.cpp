@@ -33,8 +33,8 @@ namespace
     constexpr char tag[] = "ble-register";
     constexpr char registrar_name[] = "TVX-REG";
 
-    constexpr std::uint16_t invalid_handle = 0xffff;
-    constexpr std::uint16_t desired_mtu = 64;
+    constexpr uint16_t invalid_handle = 0xffff;
+    constexpr uint16_t desired_mtu = 64;
 
     const ble_uuid128_t service_uuid = BLE_UUID128_INIT(
         0x00,
@@ -128,18 +128,18 @@ namespace
 
     tervanix::identity::IdentityStore *identity_store = nullptr;
 
-    std::array<std::uint8_t, 6> hardware_id{};
+    std::array<uint8_t, 6> hardware_id{};
 
-    std::uint8_t own_address_type = 0;
-    std::uint16_t connection_handle = invalid_handle;
-    std::uint16_t service_start_handle = 0;
-    std::uint16_t service_end_handle = 0;
-    std::uint16_t registration_value_handle = 0;
-    std::uint16_t credential_value_handle = 0;
-    std::uint16_t worker_context_value_handle = 0;
-    std::uint16_t worker_name_value_handle = 0;
+    uint8_t own_address_type = 0;
+    uint16_t connection_handle = invalid_handle;
+    uint16_t service_start_handle = 0;
+    uint16_t service_end_handle = 0;
+    uint16_t registration_value_handle = 0;
+    uint16_t credential_value_handle = 0;
+    uint16_t worker_context_value_handle = 0;
+    uint16_t worker_name_value_handle = 0;
 
-    std::uint32_t pending_nonce = 0;
+    uint32_t pending_nonce = 0;
 
     bool host_ready = false;
     bool is_scanning = false;
@@ -227,7 +227,7 @@ namespace
         vTaskDelete(nullptr);
     }
 
-    void print_uuid(const std::uint8_t *value)
+    void print_uuid(const uint8_t *value)
     {
         ESP_LOGI(
             tag,
@@ -271,7 +271,7 @@ namespace
             return true;
         }
 
-        for (std::uint8_t index = 0; index < fields.num_uuids128; ++index)
+        for (uint8_t index = 0; index < fields.num_uuids128; ++index)
         {
             if (ble_uuid_cmp(&fields.uuids128[index].u, &service_uuid.u) == 0)
             {
@@ -355,7 +355,7 @@ namespace
     }
 
     int on_credential_read(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
         ble_gatt_attr *attribute,
         void *argument)
@@ -377,7 +377,7 @@ namespace
             return 0;
         }
 
-        const std::uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+        const uint16_t length = OS_MBUF_PKTLEN(attribute->om);
         if (length == 0 || length >= tervanix::identity::bearer_token_capacity)
         {
             ESP_LOGE(
@@ -389,6 +389,7 @@ namespace
         }
 
         char token[tervanix::identity::bearer_token_capacity]{};
+
         const int copy_result =
             os_mbuf_copydata(attribute->om, 0, length, token);
         if (copy_result != 0)
@@ -413,11 +414,12 @@ namespace
         ESP_LOGI(
             tag, "Registration approved; session bearer token stored in NVS");
         read_worker_context();
+
         return 0;
     }
 
     int on_worker_name_read(
-        std::uint16_t,
+        uint16_t,
         const ble_gatt_error *error,
         ble_gatt_attr *attribute,
         void *)
@@ -429,7 +431,8 @@ namespace
             schedule_registration_retry();
             return 0;
         }
-        const std::uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+
+        const uint16_t length = OS_MBUF_PKTLEN(attribute->om);
         if (length == 0 || length >= tervanix::identity::worker_name_capacity)
         {
             ESP_LOGE(
@@ -439,13 +442,16 @@ namespace
             schedule_registration_retry();
             return 0;
         }
+
         char name[tervanix::identity::worker_name_capacity]{};
         if (os_mbuf_copydata(attribute->om, 0, length, name) != 0)
         {
             schedule_registration_retry();
             return 0;
         }
+
         name[length] = '\0';
+
         const esp_err_t save_result = identity_store->save_worker_name(name);
         if (save_result != ESP_OK)
         {
@@ -456,13 +462,16 @@ namespace
             schedule_registration_retry();
             return 0;
         }
+
         is_registered = true;
+
         ESP_LOGI(
             tag,
             "Worker assignment ready: worker_id=%s worker_name=%s expires=%u",
             identity_store->worker_id(),
             identity_store->worker_name(),
             static_cast<unsigned>(identity_store->token_expires_at()));
+
         return 0;
     }
 
@@ -474,11 +483,13 @@ namespace
             schedule_registration_retry();
             return;
         }
+
         const int result = ble_gattc_read(
             connection_handle,
             worker_name_value_handle,
             on_worker_name_read,
             nullptr);
+
         if (result != 0)
         {
             ESP_LOGE(tag, "Worker-name read start failed: %d", result);
@@ -487,7 +498,7 @@ namespace
     }
 
     int on_worker_context_read(
-        std::uint16_t,
+        uint16_t,
         const ble_gatt_error *error,
         ble_gatt_attr *attribute,
         void *)
@@ -499,7 +510,8 @@ namespace
             schedule_registration_retry();
             return 0;
         }
-        const std::uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+
+        const uint16_t length = OS_MBUF_PKTLEN(attribute->om);
         // Server wire format is packed: 1 + 12 + 16 + 4 = 33 bytes.
         if (length != 33)
         {
@@ -510,19 +522,24 @@ namespace
             schedule_registration_retry();
             return 0;
         }
-        std::uint8_t wire[33]{};
+
+        uint8_t wire[33]{};
         if (os_mbuf_copydata(attribute->om, 0, length, wire) != 0 ||
             wire[0] != 1)
         {
             schedule_registration_retry();
             return 0;
         }
+
         char worker_id[13]{};
         std::memcpy(worker_id, wire + 1, 12);
+
         tervanix::identity::SessionUuid session_id{};
         std::memcpy(session_id.data(), wire + 13, 16);
-        std::uint32_t expires = 0;
+
+        uint32_t expires = 0;
         std::memcpy(&expires, wire + 29, sizeof(expires));
+
         const esp_err_t save_result =
             identity_store->save_worker_context(worker_id, session_id, expires);
         if (save_result != ESP_OK)
@@ -534,6 +551,7 @@ namespace
             schedule_registration_retry();
             return 0;
         }
+
         read_worker_name();
         return 0;
     }
@@ -546,11 +564,13 @@ namespace
             schedule_registration_retry();
             return;
         }
+
         const int result = ble_gattc_read(
             connection_handle,
             worker_context_value_handle,
             on_worker_context_read,
             nullptr);
+
         if (result != 0)
         {
             ESP_LOGE(tag, "Worker-context read start failed: %d", result);
@@ -581,7 +601,7 @@ namespace
     }
 
     int on_registration_read(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
         ble_gatt_attr *attribute,
         void *argument)
@@ -601,7 +621,7 @@ namespace
             return 0;
         }
 
-        const std::uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+        const uint16_t length = OS_MBUF_PKTLEN(attribute->om);
 
         if (length != sizeof(tervanix::protocol::RegistrationResponse))
         {
@@ -696,12 +716,11 @@ namespace
         // authorization is provisioned through the separate read-only
         // credential characteristic after administrator approval.
         read_bearer_token();
-
         return 0;
     }
 
     int on_registration_written(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
         ble_gatt_attr *attribute,
         void *argument)
@@ -783,7 +802,7 @@ namespace
     }
 
     int on_characteristic_discovered(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
         const ble_gatt_chr *characteristic,
         void *argument)
@@ -854,7 +873,7 @@ namespace
     }
 
     int on_service_discovered(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
         const ble_gatt_svc *service,
         void *argument)
@@ -916,9 +935,9 @@ namespace
     }
 
     int on_mtu_exchanged(
-        std::uint16_t callback_connection_handle,
+        uint16_t callback_connection_handle,
         const ble_gatt_error *error,
-        std::uint16_t mtu,
+        uint16_t mtu,
         void *argument)
     {
         (void)callback_connection_handle;
@@ -1241,7 +1260,6 @@ namespace tervanix::ble
     }
 
     bool connected() { return is_connected; }
-
     bool registered() { return is_registered; }
 
 } // namespace tervanix::ble

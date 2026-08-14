@@ -77,7 +77,7 @@ namespace
                       &v[15]) != 16)
             return false;
         for (int i = 0; i < 16; i++)
-            out[i] = static_cast<std::uint8_t>(v[i]);
+            out[i] = static_cast<uint8_t>(v[i]);
         return true;
     }
 
@@ -95,16 +95,19 @@ namespace
         cfg.event_handler = event_handler;
         cfg.user_data = &response;
         cfg.timeout_ms = 10000;
+
         auto client = esp_http_client_init(&cfg);
         if (!client)
             return ESP_ERR_NO_MEM;
         esp_http_client_set_method(client, method);
+
         if (body)
         {
             esp_http_client_set_header(
                 client, "Content-Type", "application/json");
             esp_http_client_set_post_field(client, body, std::strlen(body));
         }
+
         if (dev)
             esp_http_client_set_header(client, "X-Tervanix-Device-ID", dev);
         if (node)
@@ -128,7 +131,7 @@ namespace tervanix::registration
         identity::IdentityStore &identity_store,
         registry::RegistryStore &registry_store,
         const char *server_ip,
-        std::uint16_t server_port)
+        uint16_t server_port)
     {
         char register_url[96]{};
         char registry_url[96]{};
@@ -282,7 +285,7 @@ namespace tervanix::registration
             return ESP_ERR_INVALID_RESPONSE;
         }
         std::array<identity::NodeUuid, registry::max_nodes> accepted{};
-        std::size_t count = 0;
+        size_t count = 0;
         cJSON *item = nullptr;
         cJSON_ArrayForEach(item, nodes)
         {
