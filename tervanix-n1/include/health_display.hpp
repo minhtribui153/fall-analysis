@@ -33,9 +33,14 @@ namespace tervanix::health
         std::int64_t last_publish_ms = 0;
     };
 
-    // Native ESP-IDF driver for the built-in Nesso N1 ST7789P3 LCD.
-    // Worker ID/name/UUID and bearer-session expiry are read from
-    // IdentityStore. On non-Nesso builds these functions are no-ops.
+    // Native ESP-IDF UI for the built-in Nesso N1 ST7789P3 LCD.
+    //
+    // The UI is deliberately split into several large-text pages:
+    //   KEY1 -> next page
+    //   KEY2 -> previous page
+    //
+    // Battery percentage is read from the on-board BQ27220 fuel gauge.
+    // On non-Nesso builds these functions are no-ops.
     esp_err_t initialize(const identity::IdentityStore &identity_store);
     void render(
         const Snapshot &snapshot,
