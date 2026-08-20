@@ -34,8 +34,8 @@ sudo apt install chrony mosquitto mosquitto-client -y
 ```bash
 # Note that <container_name> refers to compose.<container_name>.yaml
 # To deploy a container instance
-sudo make deploy up <container_name>
+sudo make deploy start <container_name>
 
 # To stop a container instance
-sudo make deploy down <container_name>
+sudo make deploy stop <container_name>
 ```
