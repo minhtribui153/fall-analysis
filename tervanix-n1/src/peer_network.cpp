@@ -8,7 +8,7 @@
 namespace
 {
     constexpr char TAG[] = "peer";
-    constexpr std::uint8_t BROADCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    constexpr uint8_t BROADCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 
     tervanix::peer::ReceiveHandler handler = nullptr;
 
@@ -16,13 +16,13 @@ namespace
 
     struct SeenKey {
         tervanix::identity::NodeUuid uuid{};
-        std::uint32_t sequence = 0;
+        uint32_t sequence = 0;
     };
 
     std::array<SeenKey, 32> seen{};
-    std::size_t seen_pos = 0;
+    size_t seen_pos = 0;
 
-    bool duplicate(const tervanix::identity::NodeUuid &uuid, std::uint32_t seq)
+    bool duplicate(const tervanix::identity::NodeUuid &uuid, uint32_t seq)
     {
         for (const auto &x : seen)
             if (x.sequence == seq && x.uuid == uuid && seq != 0)
@@ -31,8 +31,7 @@ namespace
         return false;
     }
 
-    void
-    on_receive(const esp_now_recv_info_t *, const std::uint8_t *data, int len)
+    void on_receive(const esp_now_recv_info_t *, const uint8_t *data, int len)
     {
         if (len != sizeof(tervanix::telemetry::PeerSample))
             return;
@@ -53,7 +52,7 @@ namespace
             --packet.ttl;
             esp_now_send(
                 BROADCAST,
-                reinterpret_cast<const std::uint8_t *>(&packet),
+                reinterpret_cast<const uint8_t *>(&packet),
                 sizeof(packet));
         }
     }
@@ -84,7 +83,7 @@ namespace tervanix::peer
     {
         return esp_now_send(
             BROADCAST,
-            reinterpret_cast<const std::uint8_t *>(&sample),
+            reinterpret_cast<const uint8_t *>(&sample),
             sizeof(sample));
     }
 

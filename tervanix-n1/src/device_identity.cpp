@@ -12,7 +12,7 @@ namespace tervanix::identity
         return esp_read_mac(out.data(), ESP_MAC_WIFI_STA);
     }
 
-    void format_device_id(const HardwareId &id, char *out, std::size_t out_size)
+    void format_device_id(const HardwareId &id, char *out, size_t out_size)
     {
         std::snprintf(
             out,

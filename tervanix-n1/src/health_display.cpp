@@ -3,6 +3,7 @@
 #if defined(TERVANIX_BOARD_NESSO_N1)
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -25,7 +26,6 @@ namespace
 
     constexpr char TAG[] = "health-ui";
 
-    // Official Nesso N1 LCD wiring.
     constexpr int LCD_WIDTH = 135;
     constexpr int LCD_HEIGHT = 240;
     constexpr int LCD_MEMORY_OFFSET_X = 52;
@@ -46,16 +46,25 @@ namespace
     constexpr std::uint16_t RED = 0xF800;
     constexpr std::uint16_t BLUE = 0x001F;
 
+    constexpr int PAGE_COUNT = 4;
+    constexpr int BATTERY_REFRESH_MS = 5000;
+    constexpr int KEY_POLL_MS = 50;
+
     esp_lcd_panel_io_handle_t lcd_io = nullptr;
     esp_lcd_panel_handle_t lcd_panel = nullptr;
     bool display_ready = false;
 
-    // Persistent frame buffer. The Nesso screen is only 64.8 KiB in RGB565.
+    std::atomic<int> active_page{0};
+    std::atomic<int> battery_percent{-1};
+    std::atomic<int> charge_status{
+        static_cast<int>(tervanix::board::ChargeStatus::Unknown)};
+    std::atomic<bool> controls_running{false};
+
     std::uint16_t framebuffer[LCD_WIDTH * LCD_HEIGHT]{};
 
     struct Glyph {
         char c;
-        std::uint16_t bits; // 3x5, row-major, bit 14 is top-left.
+        std::uint16_t bits;
     };
 
     constexpr std::uint16_t G(const char *rows)
@@ -121,6 +130,7 @@ namespace
     std::uint16_t glyph_bits(char c)
     {
         c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
         for (const auto &glyph : FONT)
         {
             if (glyph.c == c)
@@ -136,21 +146,13 @@ namespace
         std::fill(std::begin(framebuffer), std::end(framebuffer), color);
     }
 
-    void pixel(int x, int y, std::uint16_t color)
-    {
-        if (x < 0 || y < 0 || x >= LCD_WIDTH || y >= LCD_HEIGHT)
-        {
-            return;
-        }
-        framebuffer[y * LCD_WIDTH + x] = color;
-    }
-
     void fill_rect(int x, int y, int w, int h, std::uint16_t color)
     {
         const int x0 = std::max(0, x);
         const int y0 = std::max(0, y);
         const int x1 = std::min(LCD_WIDTH, x + w);
         const int y1 = std::min(LCD_HEIGHT, y + h);
+
         for (int yy = y0; yy < y1; ++yy)
         {
             std::fill(
@@ -168,9 +170,10 @@ namespace
         fill_rect(x + w - 1, y, 1, h, color);
     }
 
-    void draw_char(int x, int y, char c, std::uint16_t color, int scale = 1)
+    void draw_char(int x, int y, char c, std::uint16_t color, int scale)
     {
         const std::uint16_t bits = glyph_bits(c);
+
         for (int row = 0; row < 5; ++row)
         {
             for (int col = 0; col < 3; ++col)
@@ -186,15 +189,15 @@ namespace
     }
 
     void
-    text(int x, int y, const char *value, std::uint16_t color, int scale = 1)
+    text(int x, int y, const char *value, std::uint16_t color, int scale = 2)
     {
-        if (value == nullptr)
+        if (value == nullptr || value[0] == '\0')
         {
             value = "-";
         }
 
         const int advance = 4 * scale;
-        while (*value != '\0' && x < LCD_WIDTH - (3 * scale))
+        while (*value != '\0' && x <= LCD_WIDTH - (3 * scale))
         {
             draw_char(x, y, *value, color, scale);
             x += advance;
@@ -202,51 +205,367 @@ namespace
         }
     }
 
-    void label_value(
+    void centered_text(int y, const char *value, std::uint16_t color, int scale)
+    {
+        if (!value)
+        {
+            value = "-";
+        }
+
+        const int length = static_cast<int>(std::strlen(value));
+        const int width = std::max(0, length * 4 * scale - scale);
+        text(std::max(2, (LCD_WIDTH - width) / 2), y, value, color, scale);
+    }
+
+    void split_text(
         int y,
-        const char *label,
         const char *value,
-        std::uint16_t value_color = WHITE)
+        int chars_per_line,
+        std::uint16_t color,
+        int scale = 2)
     {
-        text(4, y, label, DIM);
-        text(31, y, value, value_color);
+        if (!value || !value[0])
+        {
+            text(4, y, "-", color, scale);
+            return;
+        }
+
+        char line[24]{};
+        int offset = 0;
+        int line_index = 0;
+        const int length = static_cast<int>(std::strlen(value));
+
+        while (offset < length && line_index < 4)
+        {
+            const int count = std::min(chars_per_line, length - offset);
+            std::memcpy(line, value + offset, count);
+            line[count] = '\0';
+            text(4, y + line_index * (12 * scale / 2), line, color, scale);
+            offset += count;
+            ++line_index;
+        }
     }
 
-    void
-    status_box(int x, int y, const char *label, bool good, bool bad = false)
+    std::uint16_t status_color(bool good, bool bad = false)
     {
-        const std::uint16_t color = bad ? RED : (good ? GREEN : YELLOW);
-        rect(x, y, 62, 17, color);
-        text(x + 4, y + 6, label, color);
-        text(x + 34, y + 6, bad ? "ERR" : (good ? "OK" : "WAIT"), color);
+        if (bad)
+        {
+            return RED;
+        }
+        return good ? GREEN : YELLOW;
     }
 
-    void uuid_string(
-        const tervanix::identity::NodeUuid &uuid,
-        char *out,
-        std::size_t out_size)
+    void battery_widget()
     {
+        const int percent = battery_percent.load();
+        const auto charging =
+            static_cast<tervanix::board::ChargeStatus>(charge_status.load());
+
+        const bool is_charging =
+            charging == tervanix::board::ChargeStatus::Charging;
+        const bool is_full = charging == tervanix::board::ChargeStatus::Full;
+
+        const std::uint16_t outline_color =
+            (percent >= 0 && percent <= 15 && !is_charging) ? RED : WHITE;
+
+        rect(91, 6, 37, 17, outline_color);
+        fill_rect(128, 11, 3, 7, WHITE);
+
+        if (percent >= 0)
+        {
+            const int fill = std::clamp(percent, 0, 100) * 31 / 100;
+            if (fill > 0)
+            {
+                fill_rect(
+                    94,
+                    9,
+                    fill,
+                    11,
+                    is_charging || is_full ? CYAN
+                                           : (percent <= 15 ? RED : GREEN));
+            }
+
+            char value[16]{};
+            std::snprintf(value, sizeof(value), "%d%%", percent);
+            text(
+                91,
+                28,
+                value,
+                is_charging ? CYAN
+                            : (is_full ? GREEN : (percent <= 15 ? RED : WHITE)),
+                2);
+        } else
+        {
+            text(91, 28, "--%", YELLOW, 2);
+        }
+
+        // Compact charge indicator beside the battery:
+        //   +  charging
+        //   F  full
+        //   blank/discharging
+        if (is_charging)
+        {
+            // Small lightning-bolt-like glyph made from rectangles so we don't
+            // need another font symbol in the tiny bitmap font.
+            fill_rect(84, 7, 3, 5, YELLOW);
+            fill_rect(81, 12, 6, 3, YELLOW);
+            fill_rect(83, 15, 3, 5, YELLOW);
+        } else if (is_full)
+        {
+            text(80, 8, "F", GREEN, 2);
+        }
+    }
+
+    void page_header(const char *title, int page)
+    {
+        text(4, 6, title, CYAN, 3);
+        battery_widget();
+        fill_rect(4, 48, 127, 2, DIM);
+
+        char indicator[16]{};
         std::snprintf(
-            out,
-            out_size,
-            "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%"
-            "02X",
-            uuid[0],
-            uuid[1],
-            uuid[2],
-            uuid[3],
-            uuid[4],
-            uuid[5],
-            uuid[6],
-            uuid[7],
-            uuid[8],
-            uuid[9],
-            uuid[10],
-            uuid[11],
-            uuid[12],
-            uuid[13],
-            uuid[14],
-            uuid[15]);
+            indicator, sizeof(indicator), "%d/%d", page + 1, PAGE_COUNT);
+        text(103, 225, indicator, DIM, 2);
+        text(4, 225, "KEY1 NEXT", DIM, 2);
+    }
+
+    const char *display_state(const char *state)
+    {
+        if (!state)
+        {
+            return "WAITING";
+        }
+
+        if (std::strcmp(state, "falling_from_height") == 0)
+        {
+            return "FALL HEIGHT";
+        }
+        if (std::strcmp(state, "near_miss") == 0)
+        {
+            return "NEAR MISS";
+        }
+        if (std::strcmp(state, "stationary") == 0)
+        {
+            return "STATIONARY";
+        }
+        if (std::strcmp(state, "walking") == 0)
+        {
+            return "WALKING";
+        }
+        if (std::strcmp(state, "running") == 0)
+        {
+            return "RUNNING";
+        }
+        if (std::strcmp(state, "jumping") == 0)
+        {
+            return "JUMPING";
+        }
+        if (std::strcmp(state, "trip") == 0)
+        {
+            return "TRIP";
+        }
+        if (std::strcmp(state, "slip") == 0)
+        {
+            return "SLIP";
+        }
+        if (std::strcmp(state, "unknown") == 0)
+        {
+            return "UNKNOWN";
+        }
+
+        return state;
+    }
+
+    void draw_home(
+        const tervanix::health::Snapshot &s,
+        const tervanix::identity::IdentityStore &store)
+    {
+        page_header("HOME", 0);
+
+        text(4, 57, "WORKER", DIM, 2);
+        text(
+            4,
+            73,
+            store.has_worker_context() ? store.worker_name() : "UNASSIGNED",
+            WHITE,
+            2);
+
+        text(4, 96, "STATE", DIM, 2);
+        centered_text(
+            115,
+            s.prediction_ready ? display_state(s.prediction_state) : "WAITING",
+            s.prediction_ready ? CYAN : YELLOW,
+            3);
+
+        char conf[12]{};
+        if (s.prediction_ready)
+        {
+            std::snprintf(
+                conf, sizeof(conf), "%.0f%%", s.prediction_confidence * 100.0f);
+        } else
+        {
+            std::strcpy(conf, "--%");
+        }
+        centered_text(151, conf, s.prediction_ready ? GREEN : YELLOW, 4);
+
+        text(4, 188, "WIFI", status_color(s.wifi_connected), 2);
+        text(
+            44,
+            188,
+            s.wifi_connected ? "OK" : "WAIT",
+            status_color(s.wifi_connected),
+            2);
+
+        text(4, 205, "MQTT", status_color(s.mqtt_connected), 2);
+        text(
+            44,
+            205,
+            s.mqtt_connected ? "OK" : "WAIT",
+            status_color(s.mqtt_connected),
+            2);
+    }
+
+    void draw_worker(
+        const tervanix::health::Snapshot &s,
+        const tervanix::identity::IdentityStore &store)
+    {
+        page_header("WORKER", 1);
+
+        text(4, 57, "NAME", DIM, 2);
+        text(
+            4,
+            74,
+            store.has_worker_context() ? store.worker_name() : "-",
+            WHITE,
+            2);
+
+        text(4, 99, "WORKER ID", DIM, 2);
+        text(
+            4,
+            116,
+            store.has_worker_context() ? store.worker_id() : "-",
+            CYAN,
+            2);
+
+        text(4, 141, "DEVICE", DIM, 2);
+        split_text(158, s.device_id, 14, WHITE, 2);
+
+        if (store.has_uuid())
+        {
+            char uuid[37]{};
+            std::snprintf(
+                uuid,
+                sizeof(uuid),
+                "%02X%02X%02X%02X%02X%02X%02X%02X",
+                store.uuid()[0],
+                store.uuid()[1],
+                store.uuid()[2],
+                store.uuid()[3],
+                store.uuid()[4],
+                store.uuid()[5],
+                store.uuid()[6],
+                store.uuid()[7]);
+            text(4, 196, "UUID", DIM, 2);
+            text(44, 196, uuid, CYAN, 1);
+        }
+    }
+
+    void draw_prediction(const tervanix::health::Snapshot &s)
+    {
+        page_header("PRED", 2);
+
+        text(4, 57, "STATE", DIM, 2);
+        centered_text(
+            78,
+            s.prediction_ready ? display_state(s.prediction_state) : "WAITING",
+            s.prediction_ready ? CYAN : YELLOW,
+            3);
+
+        text(4, 116, "CONF", DIM, 2);
+        char conf[12]{};
+        if (s.prediction_ready)
+        {
+            std::snprintf(
+                conf, sizeof(conf), "%.0f%%", s.prediction_confidence * 100.0f);
+        } else
+        {
+            std::strcpy(conf, "--%");
+        }
+        centered_text(137, conf, s.prediction_ready ? GREEN : YELLOW, 4);
+
+        text(4, 178, "MODEL", DIM, 2);
+        text(
+            60,
+            178,
+            s.model_ready ? "READY" : "WAIT",
+            status_color(s.model_ready),
+            2);
+
+        text(4, 197, "IMU", DIM, 2);
+        text(
+            44,
+            197,
+            s.imu_ready ? "READY" : "WAIT",
+            status_color(s.imu_ready),
+            2);
+
+        if (s.model_sha256 && s.model_sha256[0])
+        {
+            char hash[13]{};
+            std::memcpy(hash, s.model_sha256, 12);
+            hash[12] = '\0';
+            text(4, 214, hash, DIM, 1);
+        }
+    }
+
+    void draw_system(const tervanix::health::Snapshot &s)
+    {
+        page_header("SYSTEM", 3);
+
+        int y = 58;
+        auto row =
+            [&](const char *label, const char *value, std::uint16_t color) {
+                text(4, y, label, DIM, 2);
+                text(60, y, value, color, 2);
+                y += 23;
+            };
+
+        row("REG", s.registered ? "OK" : "WAIT", status_color(s.registered));
+        row("TIME", s.time_synced ? "OK" : "WAIT", status_color(s.time_synced));
+        row("WIFI",
+            s.wifi_connected ? "OK" : "WAIT",
+            status_color(s.wifi_connected));
+        row("MQTT",
+            s.mqtt_connected ? "OK" : "WAIT",
+            status_color(s.mqtt_connected));
+
+        row("AUTH",
+            s.mqtt_auth_rejected ? "ERR"
+                                 : (s.mqtt_auth_accepted ? "OK" : "WAIT"),
+            status_color(s.mqtt_auth_accepted, s.mqtt_auth_rejected));
+
+        text(4, y, "GW", DIM, 2);
+        text(36, y, s.gateway_ip, WHITE, 2);
+        y += 23;
+
+        char pub[18]{};
+        std::snprintf(
+            pub,
+            sizeof(pub),
+            "PUB %llu",
+            static_cast<unsigned long long>(s.published_states));
+        text(4, y, pub, CYAN, 2);
+    }
+
+    void flush()
+    {
+        if (lcd_panel == nullptr)
+        {
+            return;
+        }
+
+        esp_lcd_panel_draw_bitmap(
+            lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, framebuffer);
     }
 
     esp_err_t initialize_panel()
@@ -254,8 +573,6 @@ namespace
         ESP_RETURN_ON_ERROR(
             tervanix::board::initialize_internal_i2c(), TAG, "I2C init failed");
 
-        // Nesso reset/backlight are not ESP32 GPIOs. They are E1.P1/E1.P6 on
-        // the board's PI4IOE5V6408 at address 0x44.
         ESP_RETURN_ON_ERROR(
             tervanix::board::set_lcd_backlight(false),
             TAG,
@@ -284,8 +601,6 @@ namespace
             spi_bus_initialize(LCD_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO);
         if (result != ESP_OK && result != ESP_ERR_INVALID_STATE)
         {
-            ESP_LOGE(
-                TAG, "LCD SPI bus init failed: %s", esp_err_to_name(result));
             return result;
         }
 
@@ -299,8 +614,7 @@ namespace
         io_config.trans_queue_depth = 10;
 
         ESP_RETURN_ON_ERROR(
-            esp_lcd_new_panel_io_spi(
-                (esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_config, &lcd_io),
+            esp_lcd_new_panel_io_spi(LCD_SPI_HOST, &io_config, &lcd_io),
             TAG,
             "LCD SPI IO init failed");
 
@@ -337,14 +651,113 @@ namespace
         return ESP_OK;
     }
 
-    void flush()
+    void control_task(void *)
     {
-        if (lcd_panel == nullptr)
+        uint8_t idle_keys = 0;
+        uint8_t last_raw = 0;
+        uint8_t stable_keys = 0;
+        uint8_t previous_pressed = 0;
+        int stable_samples = 0;
+
+        bool baseline_ready = false;
+        int64_t next_battery_ms = 0;
+
+        while (controls_running.load())
         {
-            return;
+            uint8_t raw = 0;
+            if (tervanix::board::read_user_keys(raw) == ESP_OK)
+            {
+                if (!baseline_ready)
+                {
+                    idle_keys = raw;
+                    last_raw = raw;
+                    stable_keys = raw;
+                    baseline_ready = true;
+                } else
+                {
+                    if (raw == last_raw)
+                    {
+                        ++stable_samples;
+                    } else
+                    {
+                        last_raw = raw;
+                        stable_samples = 0;
+                    }
+
+                    // 2 stable samples = about 100 ms debounce.
+                    if (stable_samples >= 1 && stable_keys != raw)
+                    {
+                        stable_keys = raw;
+
+                        // The idle level is learned at startup. XOR therefore
+                        // converts either active-high or active-low wiring into
+                        // a logical "pressed" bit.
+                        const uint8_t pressed = static_cast<uint8_t>(
+                            (stable_keys ^ idle_keys) & 0x03U);
+
+                        const uint8_t new_presses =
+                            static_cast<uint8_t>(pressed & ~previous_pressed);
+
+                        if (new_presses & 0x01U)
+                        {
+                            active_page.store(
+                                (active_page.load() + 1) % PAGE_COUNT);
+                            ESP_LOGI(
+                                TAG,
+                                "KEY1 pressed -> page %d/%d",
+                                active_page.load() + 1,
+                                PAGE_COUNT);
+                        }
+
+                        if (new_presses & 0x02U)
+                        {
+                            active_page.store(
+                                (active_page.load() + PAGE_COUNT - 1) %
+                                PAGE_COUNT);
+                            ESP_LOGI(
+                                TAG,
+                                "KEY2 pressed -> page %d/%d",
+                                active_page.load() + 1,
+                                PAGE_COUNT);
+                        }
+
+                        previous_pressed = pressed;
+                    }
+                }
+            }
+
+            const int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms >= next_battery_ms)
+            {
+                uint8_t percent = 0;
+                if (tervanix::board::read_battery_percentage(percent) == ESP_OK)
+                {
+                    battery_percent.store(percent);
+                } else
+                {
+                    battery_percent.store(-1);
+                }
+
+                tervanix::board::ChargeStatus status =
+                    tervanix::board::ChargeStatus::Unknown;
+
+                if (tervanix::board::read_charge_status(status) == ESP_OK)
+                {
+                    charge_status.store(static_cast<int>(status));
+                } else
+                {
+                    charge_status.store(
+                        static_cast<int>(
+                            tervanix::board::ChargeStatus::Unknown));
+                }
+
+                next_battery_ms = now_ms + BATTERY_REFRESH_MS;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(KEY_POLL_MS));
         }
-        esp_lcd_panel_draw_bitmap(
-            lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, framebuffer);
+
+        vTaskDelete(nullptr);
     }
 
 } // namespace
@@ -360,14 +773,29 @@ namespace tervanix::health
             return result;
         }
 
+        display_ready = true;
+        controls_running.store(true);
+
+        const BaseType_t task_result = xTaskCreate(
+            control_task, "health-controls", 3072, nullptr, 3, nullptr);
+
+        if (task_result != pdPASS)
+        {
+            controls_running.store(false);
+            ESP_LOGW(TAG, "Could not start button/battery task");
+        }
+
         clear(BLACK);
-        text(8, 8, "TERVANIX N1", CYAN, 2);
-        text(8, 24, "HEALTH CONSOLE", WHITE);
-        text(8, 36, "STARTING...", YELLOW);
+        centered_text(35, "TERVANIX", CYAN, 3);
+        centered_text(78, "NESSO N1", WHITE, 3);
+        centered_text(130, "STARTING", YELLOW, 3);
+        centered_text(185, "KEY1 NEXT", DIM, 2);
         flush();
 
-        display_ready = true;
-        ESP_LOGI(TAG, "Native Nesso N1 ST7789 health display ready: 135x240");
+        ESP_LOGI(
+            TAG,
+            "Large Nesso UI ready: 4 pages, KEY1 next, KEY2 previous, BQ27220 "
+            "battery");
         return ESP_OK;
     }
 
@@ -382,114 +810,20 @@ namespace tervanix::health
 
         clear(BLACK);
 
-        text(4, 5, "TERVANIX N1", CYAN, 2);
-        text(4, 18, "HEALTH", WHITE);
-        fill_rect(4, 26, 127, 1, DIM);
-
-        status_box(4, 32, "BLE", snapshot.registered || snapshot.ble_connected);
-        status_box(69, 32, "WIFI", snapshot.wifi_connected);
-        status_box(4, 52, "MQTT", snapshot.mqtt_connected);
-        status_box(
-            69,
-            52,
-            "AUTH",
-            snapshot.mqtt_auth_accepted,
-            snapshot.mqtt_auth_rejected);
-
-        label_value(
-            75,
-            "REG",
-            snapshot.registered ? "REGISTERED" : "WAITING",
-            snapshot.registered ? GREEN : YELLOW);
-        label_value(
-            84,
-            "TIME",
-            snapshot.time_synced ? "SYNCED" : "WAITING",
-            snapshot.time_synced ? GREEN : YELLOW);
-        label_value(
-            93,
-            "IMU",
-            snapshot.imu_ready ? "OK" : "WAITING",
-            snapshot.imu_ready ? GREEN : YELLOW);
-        label_value(102, "DEV", snapshot.device_id);
-        label_value(111, "GW", snapshot.gateway_ip);
-
-        text(4, 124, "NODE UUID", DIM);
-        if (identity_store.has_uuid())
+        switch (active_page.load())
         {
-            char uuid[37]{};
-            uuid_string(identity_store.uuid(), uuid, sizeof(uuid));
-            char first[19]{};
-            char second[19]{};
-            std::memcpy(first, uuid, 18);
-            std::memcpy(second, uuid + 18, 18);
-            text(4, 133, first, CYAN);
-            text(4, 142, second, CYAN);
-        } else
-        {
-            text(4, 133, "NOT ASSIGNED", YELLOW);
-        }
-
-        char line[40]{};
-        std::snprintf(
-            line,
-            sizeof(line),
-            "PUB B:%llu S:%llu",
-            static_cast<unsigned long long>(snapshot.published_batches),
-            static_cast<unsigned long long>(snapshot.published_samples));
-        text(4, 158, line, WHITE);
-
-        std::snprintf(
-            line,
-            sizeof(line),
-            "FAIL:%llu TOKEN:%s",
-            static_cast<unsigned long long>(snapshot.publish_failures),
-            identity_store.has_bearer_token() ? "STORED" : "MISSING");
-        text(4, 168, line, identity_store.has_bearer_token() ? WHITE : YELLOW);
-
-        const std::int64_t uptime_s = esp_timer_get_time() / 1000000LL;
-        std::snprintf(
-            line,
-            sizeof(line),
-            "UPTIME:%lldS",
-            static_cast<long long>(uptime_s));
-        text(4, 181, line, DIM);
-
-        if (snapshot.last_publish_ms > 0)
-        {
-            const std::int64_t age_ms =
-                (esp_timer_get_time() / 1000LL) - snapshot.last_publish_ms;
-            std::snprintf(
-                line,
-                sizeof(line),
-                "LAST PUB:%lldMS",
-                static_cast<long long>(std::max<std::int64_t>(0, age_ms)));
-            text(4, 190, line, DIM);
-        } else
-        {
-            text(4, 190, "LAST PUB:NONE", DIM);
-        }
-
-        fill_rect(4, 204, 127, 1, DIM);
-        if (snapshot.mqtt_auth_rejected)
-        {
-            text(4, 212, "MQTT AUTH REJECTED", RED);
-        } else if (!snapshot.registered)
-        {
-            text(4, 212, "BLE REGISTRATION", YELLOW);
-            text(4, 221, "REQUIRED", YELLOW);
-        } else if (!snapshot.wifi_connected)
-        {
-            text(4, 212, "WAITING FOR WIFI", YELLOW);
-        } else if (!snapshot.time_synced)
-        {
-            text(4, 212, "SYNCING PI TIME", YELLOW);
-        } else if (!snapshot.mqtt_connected)
-        {
-            text(4, 212, "CONNECTING MQTT", YELLOW);
-        } else
-        {
-            text(4, 212, "SYSTEM ONLINE", GREEN);
+        case 0:
+            draw_home(snapshot, identity_store);
+            break;
+        case 1:
+            draw_worker(snapshot, identity_store);
+            break;
+        case 2:
+            draw_prediction(snapshot);
+            break;
+        default:
+            draw_system(snapshot);
+            break;
         }
 
         flush();

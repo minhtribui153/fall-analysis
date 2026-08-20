@@ -1,404 +1,509 @@
 #include "mqtt_publisher.hpp"
-
+#include "cJSON.h"
+#include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
+#include "har_inference.hpp"
+#include "mbedtls/base64.h"
+#include "mbedtls/gcm.h"
+#include "mbedtls/sha256.h"
+#include "mqtt_client.h"
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/time.h>
 
-#include "cJSON.h"
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "mqtt_client.h"
-
 namespace
 {
-
     constexpr char TAG[] = "mqtt";
-    constexpr std::size_t BROKER_URI_CAPACITY = 64;
-    constexpr std::size_t TOPIC_CAPACITY = 128;
-    constexpr std::size_t DEVICE_ID_CAPACITY = 18;
-    constexpr std::size_t TOKEN_CAPACITY = 64;
+
+    constexpr size_t URI = 64;
+    constexpr size_t TOP = 128;
+    constexpr size_t DEV = 18;
+    constexpr size_t WID = 13;
+    constexpr size_t TOK = 64;
+    constexpr size_t SID = 37;
 
     esp_mqtt_client_handle_t client = nullptr;
+
     std::atomic_bool connected{false};
     std::atomic_bool rejected{false};
     std::atomic_bool accepted{false};
-    std::atomic<std::uint64_t> published_batches{0};
-    std::atomic<std::uint64_t> published_samples{0};
-    std::atomic<std::uint64_t> publish_failures{0};
-    std::atomic<std::int64_t> last_publish_ms{0};
-    char broker_uri[BROKER_URI_CAPACITY]{};
-    char mqtt_device_id[DEVICE_ID_CAPACITY]{};
-    char mqtt_bearer_token[TOKEN_CAPACITY]{};
-    char auth_status_topic[TOPIC_CAPACITY]{};
+    std::atomic<uint64_t> batches{0};
+    std::atomic<uint64_t> samples{0};
+    std::atomic<uint64_t> states{0};
+    std::atomic<uint64_t> fails{0};
+    std::atomic<int64_t> lastpub{0};
 
-    bool
-    compact_device_id(const char *device_id, char *out, std::size_t out_size)
+    char uri[URI]{};
+    char device[DEV]{};
+    char worker[WID]{};
+    char session[SID]{};
+    char token[TOK]{};
+    char telemetry[TOP]{};
+    char state_topic[TOP]{};
+    char auth_topic[TOP]{};
+
+    void
+    uuid_text(const tervanix::identity::SessionUuid &v, char *out, size_t n)
     {
-        if (device_id == nullptr || out == nullptr || out_size < 13)
+        std::snprintf(
+            out,
+            n,
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%"
+            "02x",
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            v[4],
+            v[5],
+            v[6],
+            v[7],
+            v[8],
+            v[9],
+            v[10],
+            v[11],
+            v[12],
+            v[13],
+            v[14],
+            v[15]);
+    }
+
+    bool topic(const char *suffix, char *out, size_t n)
+    {
+        char compact[33]{};
+        size_t j = 0;
+
+        for (const char *p = session; *p; ++p)
+            if (*p != '-')
+                compact[j++] = std::toupper((unsigned char)*p);
+        int w =
+            std::snprintf(out, n, "tervanix/sessions/%s/%s", compact, suffix);
+
+        return w > 0 && (size_t)w < n;
+    }
+
+    bool b64(const uint8_t *in, size_t len, char *&out)
+    {
+        size_t req = 0;
+        mbedtls_base64_encode(nullptr, 0, &req, in, len);
+
+        out = (char *)std::malloc(req + 1);
+        if (!out)
+            return false;
+
+        size_t w = 0;
+        if (mbedtls_base64_encode((unsigned char *)out, req + 1, &w, in, len) !=
+            0)
         {
+            std::free(out);
+            out = nullptr;
             return false;
         }
 
-        std::size_t write_index = 0;
-        for (const char *p = device_id; *p != '\0'; ++p)
-        {
-            if (*p == ':')
-            {
-                continue;
-            }
-            if (write_index >= out_size - 1)
-            {
-                return false;
-            }
-            out[write_index++] = *p;
-        }
-
-        if (write_index != 12)
-        {
-            return false;
-        }
-
-        out[write_index] = '\0';
+        out[w] = 0;
         return true;
     }
 
-    bool build_topic(
-        const char *device_id,
-        const char *suffix,
-        char *out,
-        std::size_t out_size)
+    void key(uint8_t out[32])
     {
-        char compact[13]{};
-        if (!compact_device_id(device_id, compact, sizeof(compact)))
-        {
-            return false;
-        }
-
-        const int written = std::snprintf(
-            out, out_size, "tervanix/devices/%s/%s", compact, suffix);
-
-        return written > 0 && static_cast<std::size_t>(written) < out_size;
+        mbedtls_sha256_context c{};
+        mbedtls_sha256_init(&c);
+        mbedtls_sha256_starts(&c, 0);
+        mbedtls_sha256_update(
+            &c, (const unsigned char *)token, std::strlen(token));
+        mbedtls_sha256_finish(&c, out);
+        mbedtls_sha256_free(&c);
     }
 
-    void handle_auth_status(const esp_mqtt_event_handle_t event)
+    int64_t epoch(int64_t up)
     {
-        if (event == nullptr || event->topic == nullptr ||
-            event->data == nullptr || event->topic_len <= 0 ||
-            event->data_len <= 0)
+        timeval now{};
+
+        gettimeofday(&now, nullptr);
+        int64_t wall = (int64_t)now.tv_sec * 1000 + now.tv_usec / 1000,
+                cur = esp_timer_get_time() / 1000;
+
+        return wall - (cur - up);
+    }
+
+    cJSON *pred_json(const tervanix::har::Prediction &p)
+    {
+        cJSON *o = cJSON_CreateObject();
+        if (!o)
+            return nullptr;
+
+        cJSON_AddNumberToObject(
+            o, "prediction_sequence", (double)p.prediction_sequence);
+        cJSON_AddNumberToObject(
+            o, "source_uptime_ms", (double)p.source_uptime_ms);
+        cJSON_AddNumberToObject(o, "ts", (double)epoch(p.source_uptime_ms));
+        cJSON_AddStringToObject(o, "state", p.state);
+        cJSON_AddNumberToObject(o, "confidence", p.confidence);
+        cJSON_AddStringToObject(o, "model_sha256", p.model_sha256);
+        cJSON_AddStringToObject(o, "source", "nesso_tflite");
+
+        return o;
+    }
+
+    esp_err_t encrypt_publish(
+        const char *top,
+        const char *type,
+        cJSON *root,
+        int qos,
+        bool retain)
+    {
+        if (!root)
+            return ESP_ERR_INVALID_ARG;
+
+        if (!client || !connected.load() || rejected.load())
         {
-            return;
+            cJSON_Delete(root);
+            return ESP_ERR_INVALID_STATE;
         }
 
-        const std::size_t expected_len = std::strlen(auth_status_topic);
-        if (static_cast<std::size_t>(event->topic_len) != expected_len ||
-            std::memcmp(event->topic, auth_status_topic, expected_len) != 0)
+        char *plain = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+
+        if (!plain)
+            return ESP_ERR_NO_MEM;
+
+        size_t plen = std::strlen(plain);
+
+        uint8_t k[32]{};
+        key(k);
+
+        uint8_t nonce[12]{}, tag[16]{};
+        esp_fill_random(nonce, sizeof(nonce));
+
+        auto *ct = (uint8_t *)std::malloc(plen);
+        if (!ct)
         {
-            return;
+            std::memset(k, 0, sizeof(k));
+            cJSON_free(plain);
+            return ESP_ERR_NO_MEM;
         }
 
-        cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
-        if (root == nullptr)
+        char aad[128]{};
+        int alen = std::snprintf(
+            aad, sizeof(aad), "tervanix|v2|%s|%s|%s", session, worker, type);
+
+        mbedtls_gcm_context g{};
+        mbedtls_gcm_init(&g);
+
+        int rc = mbedtls_gcm_setkey(&g, MBEDTLS_CIPHER_ID_AES, k, 256);
+        if (rc == 0)
+            rc = mbedtls_gcm_crypt_and_tag(
+                &g,
+                MBEDTLS_GCM_ENCRYPT,
+                plen,
+                nonce,
+                sizeof(nonce),
+                (const unsigned char *)aad,
+                alen,
+                (const unsigned char *)plain,
+                ct,
+                sizeof(tag),
+                tag);
+
+        mbedtls_gcm_free(&g);
+        std::memset(k, 0, sizeof(k));
+
+        cJSON_free(plain);
+
+        if (rc != 0)
         {
-            ESP_LOGW(TAG, "Invalid MQTT auth-status JSON");
-            return;
+            std::free(ct);
+            fails++;
+            return ESP_FAIL;
         }
 
-        const cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
-        const cJSON *reason = cJSON_GetObjectItemCaseSensitive(root, "reason");
+        char *nb = nullptr, *cb = nullptr, *tb = nullptr;
+        bool ok = b64(nonce, sizeof(nonce), nb) && b64(ct, plen, cb) &&
+                  b64(tag, sizeof(tag), tb);
+        std::free(ct);
 
-        if (cJSON_IsString(status) && status->valuestring != nullptr)
+        if (!ok)
         {
-            if (std::strcmp(status->valuestring, "rejected") == 0)
+            std::free(nb);
+            std::free(cb);
+            std::free(tb);
+            fails++;
+            return ESP_ERR_NO_MEM;
+        }
+
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "schema_version", 2);
+        cJSON_AddStringToObject(e, "alg", "A256GCM");
+        cJSON_AddStringToObject(e, "message_type", type);
+        cJSON_AddStringToObject(e, "session_id", session);
+        cJSON_AddStringToObject(e, "worker_id", worker);
+        cJSON_AddStringToObject(e, "nonce", nb);
+        cJSON_AddStringToObject(e, "ciphertext", cb);
+        cJSON_AddStringToObject(e, "tag", tb);
+
+        std::free(nb);
+        std::free(cb);
+        std::free(tb);
+
+        char *payload = cJSON_PrintUnformatted(e);
+        cJSON_Delete(e);
+
+        if (!payload)
+            return ESP_ERR_NO_MEM;
+
+        int mid = esp_mqtt_client_publish(
+            client, top, payload, 0, qos, retain ? 1 : 0);
+        cJSON_free(payload);
+
+        if (mid < 0)
+        {
+            fails++;
+            return ESP_FAIL;
+        }
+
+        lastpub = esp_timer_get_time() / 1000;
+        return ESP_OK;
+    }
+
+    void auth(const esp_mqtt_event_handle_t ev)
+    {
+        if (!ev || !ev->topic || !ev->data)
+            return;
+
+        size_t n = std::strlen(auth_topic);
+        if ((size_t)ev->topic_len != n ||
+            std::memcmp(ev->topic, auth_topic, n) != 0)
+            return;
+
+        cJSON *r = cJSON_ParseWithLength(ev->data, ev->data_len);
+        if (!r)
+            return;
+
+        auto *s = cJSON_GetObjectItemCaseSensitive(r, "status");
+        auto *reason = cJSON_GetObjectItemCaseSensitive(r, "reason");
+        if (cJSON_IsString(s) && s->valuestring)
+        {
+            if (std::strcmp(s->valuestring, "rejected") == 0)
             {
-                rejected.store(true);
-                accepted.store(false);
+                rejected = true;
+                accepted = false;
                 ESP_LOGE(
                     TAG,
-                    "Telemetry authorization rejected by server%s%s",
-                    cJSON_IsString(reason) && reason->valuestring != nullptr
-                        ? ": "
-                        : "",
-                    cJSON_IsString(reason) && reason->valuestring != nullptr
+                    "session rejected%s%s",
+                    cJSON_IsString(reason) && reason->valuestring ? ": " : "",
+                    cJSON_IsString(reason) && reason->valuestring
                         ? reason->valuestring
                         : "");
-            } else if (std::strcmp(status->valuestring, "accepted") == 0)
+            } else if (std::strcmp(s->valuestring, "accepted") == 0)
             {
-                accepted.store(true);
-                if (rejected.exchange(false))
-                {
-                    ESP_LOGI(TAG, "Telemetry authorization accepted again");
-                }
+                accepted = true;
+                rejected = false;
             }
         }
-
-        cJSON_Delete(root);
+        cJSON_Delete(r);
     }
 
-    void on_mqtt_event(
-        void *,
-        esp_event_base_t,
-        std::int32_t event_id,
-        void *event_data)
+    void event(void *, esp_event_base_t, int32_t id, void *data)
     {
-        auto *event = static_cast<esp_mqtt_event_handle_t>(event_data);
-
-        switch (event_id)
+        auto *ev = (esp_mqtt_event_handle_t)data;
+        switch (id)
         {
-        case MQTT_EVENT_CONNECTED: {
-            connected.store(true);
-            ESP_LOGI(TAG, "Connected to %s as %s", broker_uri, mqtt_device_id);
-
-            const int message_id =
-                esp_mqtt_client_subscribe(client, auth_status_topic, 1);
-            if (message_id < 0)
-            {
-                ESP_LOGW(TAG, "Could not subscribe to %s", auth_status_topic);
-            } else
-            {
-                ESP_LOGI(TAG, "Subscribed to %s", auth_status_topic);
-            }
+        case MQTT_EVENT_CONNECTED:
+            connected = true;
+            esp_mqtt_client_subscribe(client, auth_topic, 1);
+            ESP_LOGI(TAG, "connected session=%s worker=%s", session, worker);
             break;
-        }
-
         case MQTT_EVENT_DISCONNECTED:
-            connected.store(false);
-            ESP_LOGW(TAG, "Disconnected; ESP-IDF MQTT client will reconnect");
+            connected = false;
             break;
-
         case MQTT_EVENT_DATA:
-            handle_auth_status(event);
+            auth(ev);
             break;
-
         case MQTT_EVENT_ERROR:
-            connected.store(false);
-            ESP_LOGE(TAG, "MQTT error event");
+            connected = false;
             break;
-
         default:
             break;
         }
     }
-
 } // namespace
 
 namespace tervanix::mqtt
 {
-
     esp_err_t connect(
-        const char *broker_ip,
-        const char *device_id,
-        const char *bearer_token)
+        const char *ip,
+        const char *dev,
+        const char *wid,
+        const identity::SessionUuid &sid,
+        const char *bearer)
     {
-        if (broker_ip == nullptr || broker_ip[0] == '\0' ||
-            device_id == nullptr || device_id[0] == '\0' ||
-            bearer_token == nullptr || bearer_token[0] == '\0')
-        {
-            ESP_LOGE(TAG, "MQTT broker/device/token is missing");
+        if (!ip || !*ip || !dev || !*dev || !wid || !*wid || !bearer ||
+            !*bearer)
             return ESP_ERR_INVALID_ARG;
-        }
 
-        if (client != nullptr)
-        {
+        if (client)
             return ESP_OK;
-        }
 
-        if (std::strlen(device_id) >= sizeof(mqtt_device_id) ||
-            std::strlen(bearer_token) >= sizeof(mqtt_bearer_token))
-        {
+        if (std::strlen(dev) >= sizeof(device) ||
+            std::strlen(wid) >= sizeof(worker) ||
+            std::strlen(bearer) >= sizeof(token))
             return ESP_ERR_INVALID_SIZE;
-        }
 
-        std::strcpy(mqtt_device_id, device_id);
-        std::strcpy(mqtt_bearer_token, bearer_token);
+        std::strcpy(device, dev);
+        std::strcpy(worker, wid);
+        std::strcpy(token, bearer);
+        uuid_text(sid, session, sizeof(session));
 
-        if (!build_topic(
-                mqtt_device_id,
-                "auth/status",
-                auth_status_topic,
-                sizeof(auth_status_topic)))
-        {
-            ESP_LOGE(
-                TAG,
-                "Invalid device_id for MQTT auth topic: %s",
-                mqtt_device_id);
-            return ESP_ERR_INVALID_ARG;
-        }
+        if (!topic("telemetry", telemetry, sizeof(telemetry)) ||
+            !topic("state", state_topic, sizeof(state_topic)) ||
+            !topic("auth/status", auth_topic, sizeof(auth_topic)))
+            return ESP_ERR_INVALID_SIZE;
 
-        const int uri_len = std::snprintf(
-            broker_uri, sizeof(broker_uri), "mqtt://%s", broker_ip);
-        if (uri_len <= 0 ||
-            static_cast<std::size_t>(uri_len) >= sizeof(broker_uri))
-        {
-            ESP_LOGE(TAG, "MQTT broker IP is too long: %s", broker_ip);
-            return ESP_ERR_INVALID_ARG;
-        }
+        int w = std::snprintf(uri, sizeof(uri), "mqtt://%s", ip);
+        if (w <= 0 || (size_t)w >= sizeof(uri))
+            return ESP_ERR_INVALID_SIZE;
 
-        esp_mqtt_client_config_t config{};
-        config.broker.address.uri = broker_uri;
-        config.credentials.username = mqtt_device_id;
-        config.credentials.authentication.password = mqtt_bearer_token;
+        esp_mqtt_client_config_t cfg{};
+        cfg.broker.address.uri = uri;
+        cfg.credentials.username = session;
 
-        client = esp_mqtt_client_init(&config);
-        if (client == nullptr)
-        {
-            ESP_LOGE(TAG, "esp_mqtt_client_init failed");
+        client = esp_mqtt_client_init(&cfg);
+        if (!client)
             return ESP_FAIL;
-        }
 
-        const esp_err_t register_result = esp_mqtt_client_register_event(
-            client,
-            static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID),
-            on_mqtt_event,
-            nullptr);
-        if (register_result != ESP_OK)
+        esp_err_t rc = esp_mqtt_client_register_event(
+            client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, event, nullptr);
+
+        if (rc == ESP_OK)
+            rc = esp_mqtt_client_start(client);
+
+        if (rc != ESP_OK)
         {
             esp_mqtt_client_destroy(client);
             client = nullptr;
-            return register_result;
-        }
-
-        const esp_err_t start_result = esp_mqtt_client_start(client);
-        if (start_result != ESP_OK)
-        {
-            ESP_LOGE(
-                TAG,
-                "esp_mqtt_client_start failed: %s",
-                esp_err_to_name(start_result));
-            esp_mqtt_client_destroy(client);
-            client = nullptr;
-            return start_result;
+            return rc;
         }
 
         ESP_LOGI(
-            TAG,
-            "MQTT client started; broker=%s (default port 1883); bearer auth "
-            "enabled",
-            broker_uri);
+            TAG, "MQTT started telemetry=%s state=%s", telemetry, state_topic);
+
         return ESP_OK;
     }
 
     bool is_connected() { return connected.load(); }
-
     bool auth_rejected() { return rejected.load(); }
-
     bool auth_accepted() { return accepted.load(); }
 
     Stats stats()
     {
-        return Stats{
-            .published_batches = published_batches.load(),
-            .published_samples = published_samples.load(),
-            .publish_failures = publish_failures.load(),
-            .last_publish_ms = last_publish_ms.load(),
-        };
+        Stats result{};
+        result.published_batches = batches.load();
+        result.published_samples = samples.load();
+        result.published_states = states.load();
+        result.publish_failures = fails.load();
+        result.last_publish_ms = lastpub.load();
+        return result;
     }
 
     esp_err_t publish_batch(
-        const TelemetrySample *samples,
+        const TelemetrySample *ss,
         int count,
-        const char *device_id)
+        const har::Prediction *p)
     {
-        if (samples == nullptr || count <= 0 || device_id == nullptr)
-        {
+        if (!ss || count <= 0)
             return ESP_ERR_INVALID_ARG;
-        }
-
-        if (client == nullptr || !connected.load() || rejected.load())
-        {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        if (std::strcmp(device_id, mqtt_device_id) != 0)
-        {
-            ESP_LOGE(
-                TAG,
-                "Refusing MQTT publish for unexpected device_id=%s",
-                device_id);
-            return ESP_ERR_INVALID_ARG;
-        }
-
-        char topic[TOPIC_CAPACITY]{};
-        if (!build_topic(device_id, "telemetry", topic, sizeof(topic)))
-        {
-            ESP_LOGE(TAG, "Invalid device_id for MQTT topic: %s", device_id);
-            return ESP_ERR_INVALID_ARG;
-        }
-
-        timeval now{};
-        gettimeofday(&now, nullptr);
-        const std::int64_t wall_now_ms =
-            static_cast<std::int64_t>(now.tv_sec) * 1000LL +
-            now.tv_usec / 1000LL;
-        const std::int64_t uptime_now_ms = esp_timer_get_time() / 1000LL;
 
         cJSON *root = cJSON_CreateObject();
-        cJSON *readings = cJSON_CreateArray();
-        if (root == nullptr || readings == nullptr)
+        cJSON *arr = cJSON_CreateArray();
+        if (!root || !arr)
         {
             cJSON_Delete(root);
-            cJSON_Delete(readings);
+            cJSON_Delete(arr);
             return ESP_ERR_NO_MEM;
         }
 
-        cJSON_AddNumberToObject(root, "schema_version", 1);
-        cJSON_AddStringToObject(root, "device_id", device_id);
-        cJSON_AddStringToObject(root, "bearer_token", mqtt_bearer_token);
-        cJSON_AddItemToObject(root, "readings", readings);
+        cJSON_AddStringToObject(root, "session_id", session);
+        cJSON_AddStringToObject(root, "worker_id", worker);
+        cJSON_AddStringToObject(root, "device_id", device);
+        cJSON_AddItemToObject(root, "readings", arr);
 
         for (int i = 0; i < count; ++i)
         {
-            const TelemetrySample &sample = samples[i];
-            const std::int64_t sample_epoch_ms =
-                wall_now_ms - (uptime_now_ms - sample.source_uptime_ms);
-
-            cJSON *reading = cJSON_CreateObject();
-            if (reading == nullptr)
+            cJSON *r = cJSON_CreateObject();
+            if (!r)
             {
                 cJSON_Delete(root);
                 return ESP_ERR_NO_MEM;
             }
 
-            cJSON_AddNumberToObject(reading, "sequence", sample.sequence);
+            cJSON_AddNumberToObject(r, "sequence", ss[i].sequence);
             cJSON_AddNumberToObject(
-                reading,
-                "source_uptime_ms",
-                static_cast<double>(sample.source_uptime_ms));
+                r, "source_uptime_ms", (double)ss[i].source_uptime_ms);
             cJSON_AddNumberToObject(
-                reading, "ts", static_cast<double>(sample_epoch_ms));
-            cJSON_AddNumberToObject(reading, "ax", sample.imu.ax);
-            cJSON_AddNumberToObject(reading, "ay", sample.imu.ay);
-            cJSON_AddNumberToObject(reading, "az", sample.imu.az);
-            cJSON_AddNumberToObject(reading, "gx", sample.imu.gx);
-            cJSON_AddNumberToObject(reading, "gy", sample.imu.gy);
-            cJSON_AddNumberToObject(reading, "gz", sample.imu.gz);
-            cJSON_AddItemToArray(readings, reading);
+                r,
+                "ts",
+                (double)(ss[i].timestamp_ms > 0
+                             ? ss[i].timestamp_ms
+                             : epoch(ss[i].source_uptime_ms)));
+            cJSON_AddNumberToObject(r, "ax", ss[i].imu.ax);
+            cJSON_AddNumberToObject(r, "ay", ss[i].imu.ay);
+            cJSON_AddNumberToObject(r, "az", ss[i].imu.az);
+            cJSON_AddNumberToObject(r, "gx", ss[i].imu.gx);
+            cJSON_AddNumberToObject(r, "gy", ss[i].imu.gy);
+            cJSON_AddNumberToObject(r, "gz", ss[i].imu.gz);
+            cJSON_AddItemToArray(arr, r);
         }
 
-        char *payload = cJSON_PrintUnformatted(root);
-        cJSON_Delete(root);
-
-        if (payload == nullptr)
+        if (p)
         {
+            cJSON *po = pred_json(*p);
+            if (!po)
+            {
+                cJSON_Delete(root);
+                return ESP_ERR_NO_MEM;
+            }
+
+            cJSON_AddItemToObject(root, "prediction", po);
+        }
+
+        esp_err_t rc = encrypt_publish(telemetry, "telemetry", root, 1, false);
+        if (rc == ESP_OK)
+        {
+            batches++;
+            samples += (uint64_t)count;
+        }
+
+        return rc;
+    }
+
+    esp_err_t publish_state(const har::Prediction &p)
+    {
+        cJSON *root = cJSON_CreateObject();
+        if (!root)
+            return ESP_ERR_NO_MEM;
+
+        cJSON_AddStringToObject(root, "session_id", session);
+        cJSON_AddStringToObject(root, "worker_id", worker);
+        cJSON_AddStringToObject(root, "device_id", device);
+
+        cJSON *po = pred_json(p);
+        if (!po)
+        {
+            cJSON_Delete(root);
             return ESP_ERR_NO_MEM;
         }
 
-        const int message_id =
-            esp_mqtt_client_publish(client, topic, payload, 0, 1, 0);
-        cJSON_free(payload);
+        cJSON_AddItemToObject(root, "prediction", po);
 
-        if (message_id < 0)
-        {
-            publish_failures.fetch_add(1);
-            ESP_LOGW(TAG, "MQTT publish failed for %s", topic);
-            return ESP_FAIL;
-        }
+        esp_err_t rc = encrypt_publish(state_topic, "state", root, 1, true);
+        if (rc == ESP_OK)
+            states++;
 
-        published_batches.fetch_add(1);
-        published_samples.fetch_add(static_cast<std::uint64_t>(count));
-        last_publish_ms.store(esp_timer_get_time() / 1000LL);
-        return ESP_OK;
+        return rc;
     }
-
 } // namespace tervanix::mqtt

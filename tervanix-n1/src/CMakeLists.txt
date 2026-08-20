@@ -1,11 +1,15 @@
 set(TERVANIX_SRCS
     "main.cpp"
     "ble_advertiser.cpp"
+    "fake_csv_sensor.cpp"
     "identity_store.cpp"
     "device_identity.cpp"
     "wifi_manager.cpp"
     "mqtt_publisher.cpp"
+    "offline_store.cpp"
     "health_display.cpp"
+    "model_manager.cpp"
+    "har_inference.cpp"
     "nesso_board_io.cpp"
     "imu/imu_sensor.cpp"
 )
@@ -20,9 +24,12 @@ set(TERVANIX_REQUIRES
     esp_timer
     mqtt
     json
+    mbedtls
     driver
     esp_driver_i2c
     esp_lcd
+    esp_http_client
+    esp-tflite-micro
 )
 
 idf_component_register(

@@ -5,8 +5,8 @@
 namespace tervanix::telemetry
 {
 
-    inline constexpr std::uint8_t protocol_version = 1;
-    inline constexpr std::uint8_t packet_type_imu = 1;
+    inline constexpr uint8_t protocol_version = 1;
+    inline constexpr uint8_t packet_type_imu = 1;
 
     struct ImuSample {
         float ax;
@@ -27,12 +27,12 @@ namespace tervanix::telemetry
      * needs custom fragmentation/reassembly.
      */
     struct __attribute__((packed)) TelemetryPacket {
-        std::uint8_t version;
-        std::uint8_t type;
-        std::uint32_t sequence;
-        std::uint64_t uptime_ms;
-        std::uint8_t node_uuid[16];
-        std::uint8_t hardware_id[6];
+        uint8_t version;
+        uint8_t type;
+        uint32_t sequence;
+        uint64_t uptime_ms;
+        uint8_t node_uuid[16];
+        uint8_t hardware_id[6];
         ImuSample sample;
     };
 

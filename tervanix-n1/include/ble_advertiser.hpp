@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "identity_store.hpp"
+#include "imu/imu_sensor.hpp"
 
 namespace tervanix::ble
 {
@@ -26,38 +27,45 @@ namespace tervanix::ble
     esp_err_t
     start_registration_client(identity::IdentityStore &identity_store);
 
+    /**
+     * @brief Stops the BLE client.
+     * @return `ESP_OK` when the BLE client stops successfully; otherwise, an
+     *         ESP-IDF error code.
+     */
+    esp_err_t stop_registration_client();
+
     bool connected();
     bool registered();
     /**
-    * @brief Sends a batch of IMU samples over BLE.
-    *
-    * @param[in] samples IMU samples to send.
-    * @param[in] count Number of samples in the batch.
-    *
-    * @return ESP_OK on success, otherwise an ESP-IDF error code.
-    */
+     * @brief Sends a batch of IMU samples over BLE.
+     *
+     * @param[in] samples IMU samples to send.
+     * @param[in] count Number of samples in the batch.
+     *
+     * @return ESP_OK on success, otherwise an ESP-IDF error code.
+     */
     esp_err_t
-    send_telemetry_batch(const sensor::ImuSample *samples, std::size_t count);
+    send_telemetry_batch(const sensor::ImuSample *samples, size_t count);
 
     /**
-    * @brief Checks if the BLE gateway is connected.
-    *
-    * @return true if connected, otherwise false.
-    */
+     * @brief Checks if the BLE gateway is connected.
+     *
+     * @return true if connected, otherwise false.
+     */
     bool connected();
 
     /**
-    * @brief Checks if BLE registration is complete.
-    *
-    * @return true if registered, otherwise false.
-    */
+     * @brief Checks if BLE registration is complete.
+     *
+     * @return true if registered, otherwise false.
+     */
     bool registered();
 
     /**
-    * @brief Checks if BLE telemetry can be sent.
-    *
-    * @return true if telemetry is ready, otherwise false.
-    */
+     * @brief Checks if BLE telemetry can be sent.
+     *
+     * @return true if telemetry is ready, otherwise false.
+     */
     bool telemetry_ready();
 
 } // namespace tervanix::ble
