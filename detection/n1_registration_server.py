@@ -43,7 +43,7 @@ CREDENTIAL_UUID = "7db20002-6e8d-4d8d-a991-2cf812340000"
 WORKER_CONTEXT_UUID = "7db20003-6e8d-4d8d-a991-2cf812340000"
 WORKER_NAME_UUID = "7db20004-6e8d-4d8d-a991-2cf812340000"
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 FLAG_HAS_UUID = 1 << 0
 FLAG_HAS_SERVER_UUID = 1 << 1
 
@@ -78,6 +78,13 @@ SAMPLE_RATE_HZ = int(os.getenv("SAMPLE_RATE_HZ", "100"))
 HAR_MODEL_PATH = Path(os.getenv("HAR_MODEL_PATH", str(Path(__file__).resolve().parent / "models" / "har_model.tflite")))
 HAR_MODEL_ID = os.getenv("HAR_MODEL_ID", "").strip()
 HAR_MODEL_MIN_CONFIDENCE = float(os.getenv("HAR_MODEL_MIN_CONFIDENCE", "0.60"))
+HAR_INFERENCE_SAMPLE_PERIOD_MS = int(os.getenv("HAR_INFERENCE_SAMPLE_PERIOD_MS", "40"))
+HAR_INFERENCE_WINDOW_MS = int(os.getenv("HAR_INFERENCE_WINDOW_MS", "1500"))
+HAR_PREDICTION_INTERVAL_MS = int(os.getenv("HAR_PREDICTION_INTERVAL_MS", "1000"))
+HAR_OFFLINE_PURGE_UNKNOWN_FIRST = os.getenv(
+    "HAR_OFFLINE_PURGE_UNKNOWN_FIRST", "true"
+).strip().lower() not in {"0", "false", "no", "off"}
+HAR_OFFLINE_REPLAY_BATCH_SIZE = int(os.getenv("HAR_OFFLINE_REPLAY_BATCH_SIZE", "10"))
 HAR_MODEL_CLASSES = ("falling_from_height","jumping","near_miss","running","slip","stationary","trip","unknown","walking")
 
 VALID_APPROVAL_STATUSES = {"pending", "approved", "rejected"}
@@ -283,7 +290,22 @@ def current_model_descriptor() -> dict[str, Any]:
         raise RuntimeError(f"HAR model file does not exist: {HAR_MODEL_PATH}")
     data = HAR_MODEL_PATH.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    return {"model_id": HAR_MODEL_ID or f"har-{digest[:12]}", "sha256": digest, "size": len(data), "sample_rate_hz": 25, "window_samples": 50, "slide_samples": 25, "num_axes": 8, "min_confidence": HAR_MODEL_MIN_CONFIDENCE, "classes": list(HAR_MODEL_CLASSES)}
+    return {
+        "model_id": HAR_MODEL_ID or f"har-{digest[:12]}",
+        "sha256": digest,
+        "size": len(data),
+        "sample_rate_hz": 25,
+        "window_samples": 50,
+        "slide_samples": 25,
+        "num_axes": 8,
+        "min_confidence": HAR_MODEL_MIN_CONFIDENCE,
+        "inference_sample_period_ms": HAR_INFERENCE_SAMPLE_PERIOD_MS,
+        "inference_window_ms": HAR_INFERENCE_WINDOW_MS,
+        "prediction_interval_ms": HAR_PREDICTION_INTERVAL_MS,
+        "offline_purge_unknown_first": HAR_OFFLINE_PURGE_UNKNOWN_FIRST,
+        "offline_replay_batch_size": HAR_OFFLINE_REPLAY_BATCH_SIZE,
+        "classes": list(HAR_MODEL_CLASSES),
+    }
 
 
 def canonical_model_manifest(descriptor: dict[str, Any]) -> str:
@@ -666,7 +688,18 @@ class TervanixRegistrationServer:
     def __init__(self) -> None:
         validate_database_schema()
         descriptor = current_model_descriptor()
-        logger.info("HAR model ready id=%s bytes=%d sha256=%s", descriptor["model_id"], descriptor["size"], descriptor["sha256"])
+        logger.info(
+            "HAR model ready id=%s bytes=%d sha256=%s; acquisition=%dms @ %dms/sample; "
+            "prediction_interval=%dms; offline_unknown_first=%s replay_batch=%d",
+            descriptor["model_id"],
+            descriptor["size"],
+            descriptor["sha256"],
+            descriptor["inference_window_ms"],
+            descriptor["inference_sample_period_ms"],
+            descriptor["prediction_interval_ms"],
+            descriptor["offline_purge_unknown_first"],
+            descriptor["offline_replay_batch_size"],
+        )
         self.server_uuid = load_server_uuid()
         self.token_secret = load_token_secret()
         self.ble: BlessServer | None = None

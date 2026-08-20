@@ -277,7 +277,7 @@ class Pipeline:
                 plaintext = AESGCM(key).decrypt(
                     nonce,
                     ciphertext + tag,
-                    session_aad(session_id, worker_id),
+                    session_aad(session_id, worker_id, message_type),
                 )
                 payload = json.loads(plaintext.decode("utf-8"))
             except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError, InvalidTag):
