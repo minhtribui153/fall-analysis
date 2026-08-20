@@ -1,10 +1,12 @@
 set(TERVANIX_SRCS
     "main.cpp"
     "ble_advertiser.cpp"
+    "fake_csv_sensor.cpp"
     "identity_store.cpp"
     "device_identity.cpp"
     "wifi_manager.cpp"
     "mqtt_publisher.cpp"
+    "offline_store.cpp"
     "health_display.cpp"
     "model_manager.cpp"
     "har_inference.cpp"
