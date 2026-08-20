@@ -802,11 +802,17 @@ extern "C" void app_main()
 
     xTaskCreate(sensor_task, "sensor", 8192, nullptr, 5, nullptr);
 #elif defined(TERVANIX_BOARD_ESP32_DEV)
-    ESP_ERROR_CHECK(tervanix::fake_sensor::initialize());
+    const esp_err_t fake_result = tervanix::fake_sensor::initialize();
 
-    imu_ready.store(true);
+    if (fake_result != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Fake CSV unavailable: %s", esp_err_to_name(fake_result));
+    } else
+    {
+        imu_ready.store(true);
 
-    xTaskCreate(fake_csv_task, "fake-csv", 6144, nullptr, 5, nullptr);
+        xTaskCreate(fake_csv_task, "fake-csv", 6144, nullptr, 5, nullptr);
+    }
 #else
     ESP_LOGI(
         TAG, "No physical or fake sensor source configured for this board");

@@ -14,5 +14,3 @@ dependencies.lock
 
 sdkconfig.esp32_dev.old
 sdkconfig.nesso_n1.old
-
-data/fake_imu.csv

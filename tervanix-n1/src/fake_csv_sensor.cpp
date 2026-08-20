@@ -21,7 +21,7 @@ namespace
 
     // Existing ESP32 Dev partition:
     // storage, data, spiffs, ..., 1920K
-    constexpr char PARTITION_LABEL[] = "storage";
+    constexpr char PARTITION_LABEL[] = "fakefs";
 
     constexpr std::size_t LINE_BUFFER_SIZE = 256;
 
