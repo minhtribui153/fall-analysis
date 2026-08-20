@@ -1,55 +1,33 @@
 # Architecture decisions
 
-## BLE-only Nesso
+## BLE only for provisioning
 
-**Decision:** remove Wi-Fi and MQTT from the active embedded build.
+**Decision:** BLE handles identity/worker/network provisioning; sensor telemetry uses Wi-Fi/MQTT.
 
-**Reasoning:** the Nesso performs a smaller, deterministic workload: sample, batch and transmit. Network protocols and JSON serialization are moved to a more capable gateway.
+**Reasoning:** separates short-range setup from continuous network transport and lets the Nesso communicate directly with server infrastructure after registration.
 
-**Consequence:** a gateway computer is mandatory; BLE cannot directly publish normal MQTT/TCP traffic.
+## Direct MQTT-to-Python ingestion
 
-## Nesso acts as BLE central
+**Decision:** the current active consumer reads MQTT directly instead of Kafka.
 
-**Decision:** the Nesso scans for and connects to a GATT server named `TVX-REG`.
+**Trade-off:** simpler deployment and debugging at prototype scale, but less durable centralized stream replay/multi-consumer decoupling than a Kafka-based design.
 
-**Reasoning:** this preserves the registration architecture already implemented in the project.
+## Persistent edge store-and-forward
 
-**Consequence:** the laptop/Pi Bluetooth stack must support acting as a BLE peripheral/GATT server, which is less consistently supported than central mode on desktop operating systems.
+**Decision:** reserve a fixed **512 KiB** region in the Nesso storage partition for offline telemetry.
 
-## Gateway owns timestamps
+**Reasoning:** sampling continues even if MQTT is temporarily unavailable.
 
-**Decision:** timestamp readings when the gateway receives BLE packets.
+**Overflow policy:** compact into the alternate bank; with the default policy, purge queued `unknown` batches first, otherwise drop the oldest active batch.
 
-**Reasoning:** the Nesso no longer has Wi-Fi/SNTP. The known 100 Hz period allows two samples in a packet to be spaced by 10 ms.
+## Hybrid ML + server rules
 
-**Consequence:** timestamps include gateway receipt latency and do not recover the exact original capture time during packet delay or reordering.
+**Current implementation:** TFLite inference runs on the Nesso and `FallDetector` also runs on every server-received reading.
 
-## Two samples per BLE packet
+**Important distinction:** low-confidence ML does not uniquely trigger server rules. Low confidence first invokes the Nesso's local heuristic fallback; server rules remain independent and always process raw readings.
 
-**Decision:** pack two six-axis float samples into 60 bytes.
+## Application-layer AES-GCM
 
-**Reasoning:** the packet fits within the negotiated 64-byte ATT MTU without custom fragmentation.
+**Decision:** encrypt telemetry payload content independently of MQTT transport security.
 
-**Consequence:** approximately 50 BLE writes per second are required at 100 Hz.
-
-## Write Without Response
-
-**Decision:** use unacknowledged telemetry writes.
-
-**Reasoning:** reduces round-trip overhead at a high write rate.
-
-**Consequence:** packets may be dropped or observed out of order; the sequence number detects but does not repair gaps.
-
-## Ten readings per MQTT message
-
-**Decision:** the gateway re-batches BLE samples into arrays of ten readings.
-
-**Reasoning:** reduces broker and Kafka Connect overhead while preserving an approximately 10-message-per-second stream.
-
-## Threshold-based detection
-
-**Decision:** use transparent signal thresholds rather than an embedded or server ML model in the active pipeline.
-
-**Reasoning:** thresholds are easier to explain, recalibrate and debug with the current dataset and timeline.
-
-**Consequence:** thresholds are dataset- and mounting-dependent and require further validation across people and realistic events.
+**Consequence:** payload confidentiality/authenticity does not depend on broker TLS, but MQTT transport itself is currently configured as `mqtt://` in firmware, so network metadata and broker authentication/security still require deployment hardening.

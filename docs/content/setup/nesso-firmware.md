@@ -1,65 +1,34 @@
-# Nesso N1 firmware setup
+# Nesso N1 firmware
 
-## Active project
+## Build location
 
-The PlatformIO project is:
-
-```text
-tervanix-n1/platformio.ini
-```
-
-Run commands from `tervanix-n1`, not the repository root.
-
-## Build
-
-```powershell
+```bash
 cd tervanix-n1
-pio run -e nesso_n1 -t clean
 pio run -e nesso_n1
 ```
 
-The active CMake source list does not compile `wifi_manager.cpp` or `mqtt_publisher.cpp`.
+Use the existing PlatformIO environment and board configuration in `platformio.ini`.
 
-## Upload
+## Runtime prerequisites
 
-Close Arduino/PlatformIO serial monitors that may hold the COM port, then:
+The device requires a successful BLE registration before enabling Wi-Fi telemetry. Registration supplies the session/worker context and credentials required for model and MQTT authentication.
 
-```powershell
-pio run -e nesso_n1 -t upload
-```
+## Runtime sequence
 
-Specify a port when auto-detection is wrong:
+1. initialize NVS and identity;
+2. BLE registration with `TVX-REG`;
+3. Wi-Fi connection;
+4. SNTP time synchronization;
+5. authenticated model manifest/binary verification;
+6. MQTT startup;
+7. offline flash journal initialization;
+8. BMI270 initialization;
+9. sensor + replay tasks.
 
-```powershell
-pio run -e nesso_n1 -t upload --upload-port COM9
-```
+## Offline telemetry
 
-## Monitor
+The firmware reserves 512 KiB in the `storage` partition for a two-bank journal. A failed batch publish is enqueued in flash and replayed when MQTT reconnects.
 
-```powershell
-pio device monitor -e nesso_n1
-```
+## Health output
 
-Expected sequence:
-
-```text
-Tervanix BLE telemetry firmware starting
-Scanning for TVX-REG
-Connected
-MTU=64
-New UUID assigned / Existing UUID accepted
-BLE registration confirmed; telemetry can start
-BMI270 ready
-```
-
-## Verified hardware configuration
-
-- BMI270 I²C address: `0x68`
-- BMI270 chip ID: `0x24`
-- SDA: GPIO 10
-- SCL: GPIO 8
-- I²C: 400 kHz
-
-## No menuconfig network settings
-
-The Nesso is BLE-only. Wi-Fi and MQTT Kconfig options were intentionally removed. Configure MQTT on the Python gateway instead.
+The status task logs BLE, registration, Wi-Fi, time, MQTT/auth, model, state and offline queue usage (`OFFLINE=queued/capacity`).

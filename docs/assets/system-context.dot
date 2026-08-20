@@ -1,15 +1,12 @@
 digraph G {
-  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.6, ranksep=0.9, fontname="Arial"];
-  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, color="#334155", fillcolor="#F8FAFC", margin="0.18,0.12"];
-  edge [fontname="Arial", fontsize=10, color="#475569", arrowsize=0.8];
-
-  nesso [label="Nesso N1\nBMI270 + BLE firmware", fillcolor="#FFF7ED", color="#EA580C"];
-  laptop [label="Gateway computer\nBLE GATT server + MQTT publisher", fillcolor="#EFF6FF", color="#2563EB"];
-  pi [label="Raspberry Pi server\nMessaging, detection, PostgreSQL", fillcolor="#F0FDF4", color="#16A34A"];
-  operator [label="Team / dashboard users\nOperate and inspect the system", fillcolor="#FAF5FF", color="#9333EA"];
-
-  nesso -> laptop [label="BLE registration\nand telemetry"];
-  laptop -> pi [label="MQTT + PostgreSQL\nconnections"];
-  operator -> laptop [label="Start gateway\nand monitor logs", dir=both];
-  operator -> pi [label="pgAdmin, Kafka UI,\nSQL and service checks", dir=both];
+  rankdir=LR; graph [bgcolor="transparent", pad="0.2"]; node [shape=box, style="rounded", fontname="Arial"];
+  reg [label="Registration + Model Service\nBLE TVX-REG / HTTP :8765"];
+  nesso [label="Nesso N1\nBMI270 + TFLite + 512 KiB offline flash"];
+  mqtt [label="Mosquitto\nMQTT broker"];
+  ingest [label="mqtt_to_postgres.py\nAES-GCM decrypt + transforms + FallDetector"];
+  db [label="PostgreSQL\nworkers / sessions / readings / events / alerts"];
+  reg -> nesso [label="BLE registration\n+ HTTP model"];
+  nesso -> mqtt [label="Wi-Fi / encrypted MQTT"];
+  mqtt -> ingest [label="session telemetry"];
+  ingest -> db [label="SQL"];
 }

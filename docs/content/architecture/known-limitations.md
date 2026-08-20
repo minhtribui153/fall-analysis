@@ -1,46 +1,40 @@
-# Known limitations and repository inconsistencies
+# Known limitations and current inconsistencies
 
-This page documents the uploaded repository **without changing code**. These items should be resolved before treating a fresh checkout as production-ready.
+## 1. Intended low-confidence routing does not match code
 
-## 1. `hardware_id` and `device_id` are inconsistent
+If the intended design is "confidence < threshold -> use server-side `detection.py` as the fallback", the current merged source does not implement that routing.
 
-The gateway and BLE packets now use `hardware_id`, but the following still use `device_id`:
+Current behaviour:
+1. `har_inference.cpp` calls local `fallback(max_accel, max_gyro)` when confidence is low;
+2. the resulting state is still published as source `nesso_tflite` with the original confidence;
+3. `mqtt_to_postgres.py` processes **every** raw sample through server `FallDetector`, regardless of confidence.
 
-- `detection/kafka_to_postgres.py`;
-- `deployment/migrations/002_fix_timestamps_and_view.sql`;
-- `RUNBOOK.md`;
-- comments and inactive legacy MQTT files.
+This is the highest-priority behaviour/documentation mismatch to resolve.
 
-As written, the gateway publishes `hardware_id` while the Kafka consumer reads `msg["device_id"]`, so the current checkout will reject or fail to parse live messages unless the consumer has been changed locally.
+## 2. MQTT subscriber defaults to QoS 0
 
-## 2. Base database schema is absent
+The Nesso publishes telemetry with QoS 1, but `mqtt_to_postgres.py` defaults `MQTT_QOS` to 0 for its subscription. If end-to-end at-least-once broker-to-consumer delivery is required, set and test `MQTT_QOS=1`.
 
-The repository includes only migration `002_fix_timestamps_and_view.sql`. It assumes the main schemas and tables already exist. A new deployment cannot create the full database from this repository alone.
+## 3. Offline journal is finite
 
-## 3. Uploaded gateway contains the old Bless permission spelling
+The fixed 512 KiB reservation prevents unbounded flash growth. When a bank fills, queued unknown batches are purged first by default; if no unknown batch is available, the oldest batch is dropped.
 
-The uploaded `n1_registration_server.py` uses `GATTAttributePermissions.writeable`; the installed Bless API observed during testing uses `writable`. A locally fixed copy may work while a fresh checkout fails.
+## 4. Replay acknowledgement is enqueue-level, not application persistence-level
 
-## 4. Windows Bless advertising fix is environment-local
+The firmware tombstones an offline record once the MQTT client accepts the QoS 1 publish into its local outbox. That is stronger than immediate deletion, but it is not the same as receiving confirmation that PostgreSQL committed the batch.
 
-During Windows testing, Bless's installed `server.py` required a compatibility change for the WinRT advertising overload. That modification lives inside the virtual environment, not in the repository or dependency pin. Recreating the environment may reintroduce the failure.
+## 5. Detection validation remains limited
 
-## 5. Telemetry loss is detected but not recovered
+`detection.py` thresholds are based on staged data and should not be presented as production-validated FFH/STF accuracy without a larger labelled evaluation set.
 
-Write Without Response can produce sequence-gap warnings. The system logs gaps but does not reorder, retransmit or mark individual database rows as missing.
+## 6. Kafka files are stale relative to the active path
 
-## 6. IMU units require validation
+Kafka/Kafka Connect assets remain in `deployment/`. Do not infer that they are part of the current runtime merely because the files exist.
 
-The detector expects acceleration in g and gyroscope values in degrees per second. `imu_sensor.cpp` explicitly notes that output units still need a stationary sanity check.
+## 7. `.env.example` is stale
 
-## 7. Thresholds have limited validation
+It still labels MQTT variables as "BLE gateway -> MQTT" and exposes legacy `MQTT_TOPIC=sensor-readings`/`MQTT_CLIENT_ID`. The active Nesso firmware uses session-scoped topics and the Python consumer uses `MQTT_TELEMETRY_SUBSCRIPTION`/`MQTT_QOS` configuration.
 
-Fall/near-miss thresholds are based on a small set of staged recordings. The FFH versus STF split is specifically marked as not validated against a real height fall.
+## 8. Dashboard not included in this archive
 
-## 8. Legacy code remains in the repository
-
-Wi-Fi/MQTT C++ files and Arduino prototypes remain for reference but are not part of the active firmware build. They may contain outdated naming and architecture assumptions.
-
-## 9. Runtime secrets and generated data were included in the uploaded archive
-
-The archive contains `.env`, `.venv`, `.pio`, `.cache`, `.git` and persisted database/pgAdmin data. These should not be committed or redistributed. The documented-source package generated with these docs excludes them.
+The uploaded repository contains no current NestJS/Next.js dashboard source. Dashboard documentation must be maintained with the separate dashboard project or merged later.

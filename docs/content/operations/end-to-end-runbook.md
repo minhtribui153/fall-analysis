@@ -1,87 +1,53 @@
 # End-to-end runbook
 
-Follow this order so every stage has a clear pass/fail point.
+## A. Start PostgreSQL and load schema
 
-## A. Pi infrastructure
+Use `detection/schemas/database_schema.sql` and verify all three schemas (`identification`, `monitoring`, `fall_detection`) exist.
 
-```bash
-cd ~/fall-analysis
-sudo make init
-sudo make deploy up postgres
-sudo make deploy up kafka
-sudo make deploy up mqtt-bridge
-docker ps
-```
+## B. Start MQTT broker
 
-Confirm PostgreSQL, Kafka, Mosquitto and Kafka Connect are running.
+Confirm the Nesso can reach the configured broker IP/port.
 
-## B. Database
-
-Confirm the base schema exists and the intended `hardware_id` changes are applied. Do not rely on migration 002 alone.
-
-## C. Connector
+## C. Start registration/model service
 
 ```bash
-curl http://localhost:8083/connector-plugins
-curl http://localhost:8083/connectors/nesso-sensor-mqtt-source/status
+python detection/n1_registration_server.py
 ```
 
-The plugin must exist; connector and task must be `RUNNING`.
+Check `/health` on port 8765.
 
-## D. Pi consumer
+## D. Start ingestion
 
 ```bash
-source .venv-pipeline/bin/activate
-python detection/kafka_to_postgres.py
+python detection/mqtt_to_postgres.py
 ```
 
-Leave it running.
+Expected startup includes a successful PostgreSQL connection and MQTT subscription.
 
-## E. Live inspection terminals
+## E. Register/approve Nesso
 
-MQTT:
+1. power/reset the Nesso;
+2. confirm BLE registration request appears;
+3. approve/link to a worker using the admin workflow;
+4. verify a monitoring session is created;
+5. allow Nesso to connect Wi-Fi, sync time and verify/download model.
 
-```bash
-docker exec -it sg-nyp-a1-eg2a17-mosquitto \
-  mosquitto_sub -h localhost -p 1883 -t sensor-readings -v
-```
+## F. Validate live telemetry
 
-Kafka:
+Verify in order:
+1. Nesso reports MQTT authenticated;
+2. `monitoring.readings` increases;
+3. `fall_detection.activity_log` receives Nesso/server activity changes;
+4. `fall_detection.classification` receives staged events when triggered.
 
-```bash
-docker exec -it sg-nyp-a1-eg2a17-kafka \
-  /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic sensor-readings
-```
+## G. Validate offline replay
 
-## F. Laptop gateway
+1. establish live telemetry;
+2. disconnect or stop MQTT while leaving Nesso sampling;
+3. confirm `OFFLINE=...` queue count increases on the Nesso;
+4. restore MQTT;
+5. confirm the offline count decreases and PostgreSQL receives the preserved sequence/timestamp records.
 
-Update `.env` with the Pi IP, confirm ports 1883 and 5432, then:
+## H. Validate low-confidence behaviour
 
-```powershell
-python n1_registration_server.py
-```
-
-Wait for both MQTT connection and BLE gateway startup.
-
-## G. Nesso
-
-Power/reset the already-flashed Nesso. Monitor serial output if available.
-
-## H. Validate in order
-
-1. Nesso registers in `node_registrations`.
-2. MQTT terminal displays `hardware_id` JSON arrays.
-3. Kafka terminal displays the same payload.
-4. Consumer shows no processing warning.
-5. PostgreSQL reading count increases.
-
-## Success condition
-
-```text
-Nesso → BLE gateway → Mosquitto → Kafka Connect → Kafka
-      → detection consumer → PostgreSQL
-```
-
-Every arrow must have an observed test result, not only a running process.
+Current expected source behaviour is **local heuristic fallback plus independent server rules**, not conditional server routing. Capture the Nesso log state/confidence and compare `nesso_tflite` and `server_rules` rows in PostgreSQL.

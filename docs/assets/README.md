@@ -1,11 +1,9 @@
-# Documentation assets
+# Diagram assets
 
-This folder contains editable Graphviz source (`.dot`) and rendered SVG diagrams used by the Markdown documentation.
+The `.dot` files are source-of-truth Graphviz diagrams. The matching `.svg` files are rendered copies used by the Markdown pages.
 
-To regenerate an SVG after editing a diagram:
+Regenerate from this directory with:
 
 ```bash
-dot -Tsvg system-context.dot -o system-context.svg
+for f in *.dot; do dot -Tsvg "$f" -o "${f%.dot}.svg"; done
 ```
-
-The same command applies to each `.dot` file.

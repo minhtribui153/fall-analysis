@@ -1,50 +1,27 @@
 # Architecture overview
 
-**Source of truth:** `tervanix-n1/src`, `n1_registration_server.py`, `deployment`, and `detection`.
+## Active architecture
 
-## Purpose
+The repository implements a hybrid edge/server worker-safety pipeline.
 
-The system monitors motion using a waist-mounted Nesso N1. It captures accelerometer and gyroscope readings, transports them to a server pipeline, classifies activity/fall events, and stores raw and derived data in PostgreSQL.
-
-## System context
-
-![System context](../../assets/system-context.svg)
-
-The system has three physical execution locations:
-
-1. **Nesso N1 embedded device** — reads the BMI270 and acts as a BLE central/client.
-2. **Gateway computer** — advertises the `TVX-REG` BLE service, registers devices, timestamps telemetry and publishes MQTT.
-3. **Raspberry Pi server** — runs the messaging and persistence stack.
-
-## Container view
+1. **BLE registration and provisioning**: `detection/n1_registration_server.py` advertises `TVX-REG`. It registers a Nesso, associates it with a worker/session, provisions Wi-Fi/session credentials and exposes authenticated model endpoints.
+2. **Edge sensing and inference**: `tervanix-n1` samples the BMI270, runs TensorFlow Lite Micro HAR inference, and creates 10-reading telemetry batches.
+3. **Offline resilience**: failed MQTT batches are written to a fixed 512 KiB flash journal and replayed when MQTT becomes available.
+4. **MQTT transport**: telemetry is application-layer encrypted with AES-256-GCM and published to session-specific MQTT topics.
+5. **Server processing**: `detection/mqtt_to_postgres.py` authenticates/decrypts messages, computes SMV and gyro magnitude, records device predictions, runs `FallDetector` on every raw reading, and writes PostgreSQL.
+6. **Persistence**: PostgreSQL stores workers, devices, registrations, sessions, readings, activity logs, classifications and alerts.
 
 ![Container view](../../assets/container-view.svg)
 
-| Container/component | Responsibility | Primary implementation |
-|---|---|---|
-| Nesso firmware | Identity, BLE discovery/registration, IMU sampling, telemetry transmission | `tervanix-n1/src` |
-| BLE-MQTT gateway | BLE GATT server, UUID assignment, timestamping, MQTT batching | `n1_registration_server.py` |
-| Mosquitto | Receives `sensor-readings` MQTT messages | `deployment/compose.mqtt-bridge.yaml` |
-| Kafka Connect | Moves MQTT records into Kafka | `deployment/kafka-connect/mqtt_source_connector.json` |
-| Kafka | Durable event stream for sensor batches | `deployment/compose.kafka.yaml` |
-| Detection consumer | Calculates derived values, detects events, writes PostgreSQL | `detection/kafka_to_postgres.py` and `detection/detection.py` |
-| PostgreSQL | Registration, sessions, raw readings, activity and event storage | `deployment/compose.postgres.yaml` plus external base schema |
+## Key clarification: ML confidence
 
-## Architectural boundaries
+The current code contains **two rule mechanisms**:
 
-### Embedded boundary
+- `tervanix-n1/src/har_inference.cpp`: if TFLite confidence is below `min_confidence` (default `0.60`), an **on-device magnitude heuristic** replaces the state with `stationary`, `falling_from_height`, `trip`, `jumping`, `walking`, or `unknown`.
+- `detection/detection.py`: an independent server-side `FallDetector` processes every raw sensor reading received by `mqtt_to_postgres.py`.
 
-The Nesso intentionally has no Wi-Fi or MQTT responsibility in the active build. `tervanix-n1/src/CMakeLists.txt` compiles BLE, identity and IMU files only.
+Therefore the current implementation is not a conditional "low confidence -> server rules only" router.
 
-### Gateway boundary
+## Legacy infrastructure
 
-The gateway owns:
-
-- wall-clock timestamps;
-- device registration records;
-- conversion from compact binary BLE packets to JSON;
-- batching ten readings per MQTT message.
-
-### Server boundary
-
-The Raspberry Pi owns infrastructure services and long-term persistence. Keeping Kafka and its Python consumer on the same Pi avoids remote Kafka listener complications caused by the current `EXTERNAL://localhost:19092` advertised listener.
+Kafka, Kafka Connect and the older MQTT bridge compose files remain in `deployment/`, but the active Python ingestion program is `detection/mqtt_to_postgres.py` and does not consume Kafka.

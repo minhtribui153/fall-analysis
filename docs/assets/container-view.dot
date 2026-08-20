@@ -1,38 +1,14 @@
 digraph G {
-  graph [rankdir=LR, bgcolor="transparent", pad=0.3, nodesep=0.45, ranksep=0.8, fontname="Arial", compound=true];
-  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=10.5, color="#334155", fillcolor="#FFFFFF", margin="0.16,0.10"];
-  edge [fontname="Arial", fontsize=9, color="#475569", arrowsize=0.75];
-
-  subgraph cluster_nesso {
-    label="Nesso N1"; color="#FDBA74"; style="rounded,filled"; fillcolor="#FFF7ED"; fontname="Arial";
-    fw [label="ESP-IDF firmware\nIdentity + BLE + IMU"];
-    bmi [label="BMI270\n100 Hz six-axis sensor"];
-    bmi -> fw [label="I²C"];
-  }
-
-  subgraph cluster_laptop {
-    label="Gateway computer"; color="#93C5FD"; style="rounded,filled"; fillcolor="#EFF6FF"; fontname="Arial";
-    gateway [label="n1_registration_server.py\nGATT server, timestamps, MQTT"];
-  }
-
-  subgraph cluster_pi {
-    label="Raspberry Pi server"; color="#86EFAC"; style="rounded,filled"; fillcolor="#F0FDF4"; fontname="Arial";
-    mqtt [label="Mosquitto\nMQTT broker"];
-    connect [label="Kafka Connect\nMQTT Source Connector"];
-    kafka [label="Kafka\nsensor-readings topic"];
-    consumer [label="kafka_to_postgres.py\nDetection + persistence"];
-    postgres [label="PostgreSQL\nRaw + derived data"];
-    ui [label="pgAdmin / Kafka UI\nOperations"];
-
-    mqtt -> connect [label="subscribe"];
-    connect -> kafka [label="produce"];
-    kafka -> consumer [label="consume"];
-    consumer -> postgres [label="SQL inserts"];
-    ui -> postgres [dir=both, label="inspect"];
-    ui -> kafka [dir=both, label="inspect"];
-  }
-
-  fw -> gateway [label="BLE GATT"];
-  gateway -> mqtt [label="MQTT QoS 1"];
-  gateway -> postgres [label="registration SQL"];
+  rankdir=LR; graph [bgcolor="transparent", pad="0.2"]; node [shape=box, style="rounded", fontname="Arial"];
+  nesso [label="Nesso firmware\nregistration_client\nimu_sensor\nhar_inference\noffline_store\nmqtt_publisher"];
+  reg [label="n1_registration_server.py\nBLE registration\nadmin API\nmodel manifest/binary"];
+  broker [label="Mosquitto"];
+  pipe [label="mqtt_to_postgres.py\ndecrypt / validate\nSMV + gyro magnitude\nserver FallDetector"];
+  rules [label="detection.py\nserver rules"];
+  db [label="PostgreSQL"];
+  reg -> nesso [dir=both,label="BLE / HTTP"];
+  nesso -> broker [label="MQTT QoS1 publish"];
+  broker -> pipe [label="subscription QoS configurable"];
+  pipe -> rules [label="every raw reading"];
+  pipe -> db [label="readings + Nesso predictions + rule results"];
 }

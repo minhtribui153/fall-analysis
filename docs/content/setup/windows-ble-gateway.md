@@ -1,60 +1,21 @@
-# Windows BLE gateway setup
+# Registration host notes
 
-## 1. Use the existing working environment
+This filename is retained for compatibility with existing links, but the role has changed.
 
-The tested environment contains local Bless/WinRT compatibility changes. Rebuilding it from `requirements.txt` alone may not reproduce the same behaviour.
+The current repository no longer uses a Windows BLE-to-MQTT telemetry gateway. `detection/n1_registration_server.py` is a **BLE registration/model service**. After registration, the Nesso uses Wi-Fi/MQTT directly.
 
-Activate:
+The host running this service must support the Bless BLE backend for its operating system and have access to PostgreSQL plus the HAR model file.
 
-```powershell
-cd C:\Users\<user>\Documents\fall-analysis
-.\.venv\Scripts\Activate.ps1
+Run:
+
+```bash
+python detection/n1_registration_server.py
 ```
 
-## 2. Point `.env` at the Pi
+Expected service roles:
+- advertise BLE name `TVX-REG`;
+- approve/link a Nesso to a worker and session;
+- provision credentials/context;
+- serve authenticated model manifest and binary over HTTP port 8765.
 
-```env
-POSTGRES_DB="fall_analysis"
-POSTGRES_USER="eg2a17"
-POSTGRES_PASSWORD="..."
-POSTGRES_HOST="<PI_IP>"
-POSTGRES_PORT="5432"
-
-MQTT_HOST="<PI_IP>"
-MQTT_PORT="1883"
-MQTT_TOPIC="sensor-readings"
-MQTT_CLIENT_ID="tervanix-ble-gateway"
-```
-
-## 3. Verify network reachability
-
-```powershell
-Test-NetConnection <PI_IP> -Port 5432
-Test-NetConnection <PI_IP> -Port 1883
-```
-
-Both must return `TcpTestSucceeded : True`.
-
-## 4. Start the gateway
-
-```powershell
-python n1_registration_server.py
-```
-
-Expected milestones:
-
-```text
-PostgreSQL schema ready
-Starting MQTT bridge to <PI_IP>:1883
-MQTT connected to <PI_IP>:1883; topic=sensor-readings
-Advertising name: TVX-REG
-BLE registration + telemetry gateway started
-```
-
-## 5. Keep the terminal open
-
-The process must remain running while the Nesso streams. Stopping it removes the BLE peripheral and flushes any partial MQTT batch.
-
-## Fresh-environment warning
-
-The uploaded source still contains `writeable` rather than the tested Bless API's `writable`, and the WinRT advertising overload was patched inside the virtual environment during testing. See [Known limitations](../architecture/known-limitations.md).
+Do not document this process as a sensor telemetry bridge.

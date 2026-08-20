@@ -1,56 +1,48 @@
 # Fall Analysis Documentation
 
-This directory documents the current `fall-analysis` repository as reviewed on **4 August 2026**.
+This directory documents the current `fall-analysis` repository as reviewed on **20 August 2026**, after merge commit `23f1bdf` (`compile_fix`).
 
-The project collects six-axis BMI270 telemetry from a Nesso N1, transports it through BLE, MQTT and Kafka, classifies activity/fall events, and stores results in PostgreSQL.
+The active telemetry path is:
 
-> **Canonical identity term:** `hardware_id` is the MAC-derived identifier used to identify a physical Nesso. References to `device_id` in older files are legacy and are listed under [Known limitations](content/architecture/known-limitations.md).
+`Nesso N1 -> Wi-Fi -> encrypted MQTT -> Mosquitto -> detection/mqtt_to_postgres.py -> PostgreSQL`
+
+BLE is used for registration/provisioning, not for normal sensor streaming. The Nesso also performs embedded HAR inference and contains a persistent flash-backed offline telemetry journal.
+
+> **Important implementation finding:** the current source does **not** route only low-confidence ML predictions to `detection.py`. `har_inference.cpp` applies an on-device heuristic fallback whenever model confidence is below the configured threshold, while `mqtt_to_postgres.py` runs the server-side `FallDetector` independently on every received raw IMU reading.
 
 ## Documentation map
 
 ### Architecture
-
-- [Architecture overview](content/architecture/overview.md)
+- [Overview](content/architecture/overview.md)
 - [Components](content/architecture/components.md)
-- [End-to-end data flow](content/architecture/data-flow.md)
-- [BLE and messaging protocols](content/architecture/protocols.md)
-- [Deployment topology](content/architecture/deployment.md)
-- [Database model](content/architecture/database.md)
+- [Data flow](content/architecture/data-flow.md)
+- [Protocols and security](content/architecture/protocols.md)
+- [Database](content/architecture/database.md)
+- [Deployment](content/architecture/deployment.md)
 - [Architecture decisions](content/architecture/decisions.md)
-- [Known limitations and inconsistencies](content/architecture/known-limitations.md)
+- [Known limitations](content/architecture/known-limitations.md)
 
-### Setup
-
+### Setup and operations
 - [Prerequisites](content/setup/prerequisites.md)
-- [Raspberry Pi server](content/setup/raspberry-pi-server.md)
-- [Windows BLE gateway](content/setup/windows-ble-gateway.md)
-- [Nesso N1 firmware](content/setup/nesso-firmware.md)
-
-### Operations
-
+- [Raspberry Pi/server setup](content/setup/raspberry-pi-server.md)
+- [Nesso firmware](content/setup/nesso-firmware.md)
+- [Registration host notes](content/setup/windows-ble-gateway.md)
 - [End-to-end runbook](content/operations/end-to-end-runbook.md)
-- [Verification checklist](content/operations/verification.md)
+- [Verification](content/operations/verification.md)
 - [Troubleshooting](content/operations/troubleshooting.md)
 
 ### Reference
-
 - [Repository map](content/reference/repository-map.md)
-- [Configuration reference](content/reference/configuration.md)
+- [Configuration](content/reference/configuration.md)
 - [Message contracts](content/reference/message-contracts.md)
-- [Command cheat sheet](content/reference/command-cheatsheet.md)
-- [Legacy and generated components](content/reference/legacy-components.md)
+- [Current implementation verification](content/reference/current-implementation-verification.md)
+- [Legacy components](content/reference/legacy-components.md)
 - [External references](content/reference/external-references.md)
 
 ## System at a glance
 
 ![System context](assets/system-context.svg)
 
-The recommended deployment split is:
+## Scope note
 
-- **Nesso N1:** samples the BMI270 and sends binary BLE telemetry.
-- **Windows laptop:** hosts the BLE GATT gateway and publishes MQTT messages.
-- **Raspberry Pi:** hosts Mosquitto, Kafka Connect, Kafka, PostgreSQL, and the Kafka-to-PostgreSQL Python consumer.
-
-## Documentation scope
-
-These pages document custom project code and configuration. Third-party generated content under `.venv`, `.pio`, `.cache`, `managed_components`, and runtime database directories is intentionally not documented file-by-file.
+The dashboard source is not present inside the uploaded `fall-analysis` repository. These docs therefore document the repository itself. Dashboard integration is described only at the database boundary where the schema exposes readings, activities, classifications and alerts.

@@ -1,76 +1,69 @@
 # Message contracts
 
-## BLE registration request example
+## MQTT telemetry topic
 
-Logical representation:
+`tervanix/sessions/<32-hex-session-uuid>/telemetry`
 
-```text
-version=1
-flags=HAS_UUID or 0
-hardware_id=6 raw bytes
-current_uuid=16 bytes
-nonce=uint32 little-endian
-```
+## Encrypted outer envelope
 
-The UUID is only trusted when the response echoes the nonce and returns an accepted status.
-
-## BLE telemetry example
-
-```text
-version=1
-sample_count=2
-hardware_id=48 F6 EE C4 CB E8
-first_sample_sequence=32910
-sample[0]=(ax, ay, az, gx, gy, gz)
-sample[1]=(ax, ay, az, gx, gy, gz)
-```
-
-## MQTT/Kafka JSON
-
-Canonical updated object:
+Conceptually:
 
 ```json
 {
-  "hardware_id": "48:F6:EE:C4:CB:E8",
-  "ts": 1785221234567,
-  "ax": 0.01,
-  "ay": -0.02,
-  "az": 0.99,
-  "gx": 1.2,
-  "gy": 0.5,
-  "gz": -0.3
+  "schema_version": 2,
+  "alg": "A256GCM",
+  "session_id": "<uuid>",
+  "worker_id": "<worker-id>",
+  "nonce": "<base64>",
+  "ciphertext": "<base64>",
+  "tag": "<base64>"
 }
 ```
 
-A normal gateway message is an array containing ten such objects.
+The bearer token itself is not included.
 
-## Derived reading values
-
-The persistence consumer calculates:
-
-```text
-smv = sqrt(ax² + ay² + az²)
-gyro_magnitude = sqrt(gx² + gy² + gz²)
-```
-
-## Classification output
-
-A completed event can contain:
+## Decrypted telemetry payload
 
 ```json
 {
-  "event_type": "FALL | NEAR_MISS | NORMAL",
-  "fall_type": "FFH | STF | null",
-  "max_smv": 3.1,
-  "max_rotation": 220.0,
-  "freefall_duration": 0.22,
-  "tilt_change": 75.0,
-  "responsiveness": "still | active",
-  "activity_before_event": "stationary | walking | running | jumping | unknown",
-  "ts": 1785221234.5
+  "session_id": "<uuid>",
+  "worker_id": "<worker-id>",
+  "device_id": "<device-id>",
+  "readings": [
+    {
+      "sequence": 1,
+      "source_uptime_ms": 12345,
+      "ts": 1780000000000,
+      "ax": 0.0,
+      "ay": 0.0,
+      "az": 1.0,
+      "gx": 0.0,
+      "gy": 0.0,
+      "gz": 0.0
+    }
+  ],
+  "prediction": {
+    "prediction_sequence": 1,
+    "source_uptime_ms": 12345,
+    "ts": 1780000000000,
+    "state": "walking",
+    "confidence": 0.91,
+    "model_sha256": "<64 hex>",
+    "source": "nesso_tflite"
+  }
 }
 ```
 
-## Compatibility warning
+`prediction` is optional. A stored offline batch can preserve it when present.
 
-The current uploaded Kafka consumer documents and reads `device_id`; this contract documents the intended updated `hardware_id` form. Both producer and consumer must use the same key before end-to-end testing.
+## Allowed Nesso prediction states
+
+- `falling_from_height`
+- `jumping`
+- `near_miss`
+- `running`
+- `slip`
+- `stationary`
+- `trip`
+- `unknown`
+- `walking`

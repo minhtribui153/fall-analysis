@@ -1,49 +1,46 @@
 # Configuration reference
 
-## Environment variables
+## Registration service
 
-| Variable | Used by | Purpose | Typical value |
-|---|---|---|---|
-| `DIR_DATA` | Docker Compose | Persistent runtime root | `./.data` |
-| `POSTGRES_DB` | PostgreSQL and Python | Database name | `fall_analysis` |
-| `POSTGRES_USER` | PostgreSQL and Python | Database user | project-specific |
-| `POSTGRES_PASSWORD` | PostgreSQL and Python | Database password | secret |
-| `POSTGRES_HOST` | Python | Database host | Pi IP on laptop; `localhost` on Pi |
-| `POSTGRES_PORT` | Python | Database port | `5432` |
-| `DATABASE_URL` | Python | Optional full DSN override | PostgreSQL URI |
-| `PGADMIN_DEFAULT_EMAIL` | pgAdmin | Initial login | project-specific |
-| `PGADMIN_DEFAULT_PASSWORD` | pgAdmin | Initial password | secret |
-| `MQTT_HOST` | Gateway | Broker host | Pi IP |
-| `MQTT_PORT` | Gateway | Broker port | `1883` |
-| `MQTT_TOPIC` | Gateway | Output topic | `sensor-readings` |
-| `MQTT_CLIENT_ID` | Gateway | MQTT client identifier | `tervanix-ble-gateway` |
-| `MQTT_USERNAME` | Gateway | Optional broker username | empty in test setup |
-| `MQTT_PASSWORD` | Gateway | Optional broker password | empty in test setup |
-| `KAFKA_BROKER` | Consumer | Bootstrap server | `localhost:19092` |
-| `KAFKA_TOPIC` | Consumer | Input topic | `sensor-readings` |
-| `KAFKA_GROUP_ID` | Consumer | Consumer group | `postgres-writer` |
-
-## Fixed protocol constants
-
-| Constant | Value |
+| Variable | Default / meaning |
 |---|---|
-| BLE name | `TVX-REG` |
-| BLE service UUID | `7db20000-6e8d-4d8d-a991-2cf812340000` |
-| Registration UUID | `7db20001-6e8d-4d8d-a991-2cf812340000` |
-| Telemetry UUID | `7db20002-6e8d-4d8d-a991-2cf812340000` |
-| Sample rate | 100 Hz |
-| Sample period | 10 ms |
-| BLE samples per packet | 2 |
-| MQTT readings per batch | 10 |
-| PostgreSQL reading batch | 50 |
+| `REGISTRATION_ADMIN_HOST` | `0.0.0.0` |
+| `REGISTRATION_ADMIN_PORT` | `8765` |
+| `REGISTRATION_ADMIN_TOKEN` | optional admin token |
+| `REGISTRATION_SESSION_TTL_SECONDS` | `28800` (8 h) |
+| `SAMPLE_RATE_HZ` | `100` |
+| `HAR_MODEL_PATH` | `detection/models/har_model.tflite` |
+| `HAR_MODEL_ID` | derived from SHA when empty |
+| `HAR_MODEL_MIN_CONFIDENCE` | `0.60` |
+| `REGISTRATION_TOKEN_SECRET` | shared server secret, min 32 chars |
 
-## Firmware board settings
+## MQTT ingestion
 
-`nesso_n1` uses:
+| Variable | Default / meaning |
+|---|---|
+| `MQTT_HOST` | `127.0.0.1` |
+| `MQTT_PORT` | `1883` |
+| `MQTT_KEEPALIVE` | `60` |
+| `MQTT_TELEMETRY_SUBSCRIPTION` | `tervanix/sessions/+/telemetry` |
+| `MQTT_QOS` | `0` |
+| `MQTT_USERNAME` | optional |
+| `MQTT_PASSWORD` | optional |
+| `READING_BATCH_SIZE` | `50` |
+| `MQTT_QUEUE_SIZE` | `2000` |
+| `LAST_SEEN_UPDATE_SECONDS` | `5` |
 
-- board profile `esp32-c6-devkitc-1`;
-- ESP-IDF via `espressif32@6.13.0`;
-- 2 MB flash metadata;
-- large single-app partition;
-- 1.5 MiB maximum application size;
-- serial monitor at 115200 baud.
+## Firmware/model defaults
+
+- model sample rate: 25 Hz;
+- model window: 50 samples;
+- slide: 25 samples;
+- features: 8;
+- minimum confidence: 0.60;
+- acquisition period: 40 ms;
+- acquisition history window default: 1500 ms;
+- prediction interval default: 1000 ms;
+- telemetry batch: 10 samples;
+- fixed offline storage reservation: 512 KiB;
+- offline default purge policy: unknown-first.
+
+> `.env.example` still contains legacy names/comments and should be refreshed before relying on it as canonical configuration documentation.

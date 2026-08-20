@@ -1,108 +1,49 @@
-# Raspberry Pi server setup
+# Raspberry Pi / server setup
 
-## 1. Prepare `.env`
+This page describes the active direct-MQTT architecture rather than the older Kafka path.
 
-From the repository root:
+## 1. PostgreSQL
 
-```bash
-cp .env.example .env
-nano .env
-```
-
-Set database credentials and `DIR_DATA`. Pi-hosted processes should normally use `POSTGRES_HOST=localhost` and Kafka broker `localhost:19092`.
-
-## 2. Prepare runtime directories
+Create the configured PostgreSQL database and load:
 
 ```bash
-sudo make init
-mkdir -p "${DIR_DATA:-./.data}/instances/mosquitto/config"
-mkdir -p "${DIR_DATA:-./.data}/instances/mosquitto/data"
-mkdir -p "${DIR_DATA:-./.data}/instances/mosquitto/log"
+psql "$DATABASE_URL" -f detection/schemas/database_schema.sql
 ```
 
-Example test-only Mosquitto configuration:
+Alternatively provide `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`.
 
-```conf
-listener 1883
-allow_anonymous true
-log_dest stdout
-```
+## 2. Mosquitto
 
-Do not expose anonymous MQTT to an untrusted network.
+Run a broker reachable by the Nesso. Development deployments may use port 1883, but production/untrusted networks should add proper broker authentication and transport security.
 
-## 3. Start PostgreSQL
+## 3. Python environment
 
 ```bash
-sudo make deploy up postgres
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r detection/requirements.txt
 ```
 
-Check:
+## 4. Registration/model service
+
+Ensure the HAR model exists at the configured `HAR_MODEL_PATH` and configure the registration token secret.
 
 ```bash
-docker exec sg-nyp-a1-eg2a17-postgres \
-  pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+python detection/n1_registration_server.py
 ```
 
-Load the team's base schema before applying later migrations.
+Default HTTP/admin port: `8765`.
 
-## 4. Start Kafka
+## 5. MQTT ingestion
 
 ```bash
-sudo make deploy up kafka
+python detection/mqtt_to_postgres.py
 ```
 
-Create the topic if needed:
+Default subscription: `tervanix/sessions/+/telemetry`.
 
-```bash
-docker exec sg-nyp-a1-eg2a17-kafka \
-  /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 \
-  --create --if-not-exists \
-  --topic sensor-readings \
-  --partitions 1 --replication-factor 1
-```
+Set `MQTT_QOS=1` if broker-to-consumer QoS 1 is required; the current code default is 0.
 
-## 5. Start Mosquitto and Kafka Connect
+## 6. Legacy services
 
-```bash
-sudo make deploy up mqtt-bridge
-```
-
-Wait for Connect:
-
-```bash
-curl http://localhost:8083/
-curl http://localhost:8083/connector-plugins
-```
-
-The plugin list must include `io.confluent.connect.mqtt.MqttSourceConnector`.
-
-## 6. Register the connector
-
-```bash
-curl -X POST \
-  -H 'Content-Type: application/json' \
-  --data @deployment/kafka-connect/mqtt_source_connector.json \
-  http://localhost:8083/connectors
-```
-
-Check status:
-
-```bash
-curl http://localhost:8083/connectors/nesso-sensor-mqtt-source/status
-```
-
-Both connector and task must be `RUNNING`.
-
-## 7. Start the Kafka-to-PostgreSQL process
-
-Create a Pi-specific environment without desktop BLE dependencies:
-
-```bash
-python3 -m venv .venv-pipeline
-source .venv-pipeline/bin/activate
-python -m pip install asyncpg==0.31.0 aiokafka==0.14.0 python-dotenv==1.2.2
-python detection/kafka_to_postgres.py
-```
-
-> Reconcile the consumer's legacy `device_id` references with `hardware_id` before a live updated-schema run.
+Kafka and Kafka Connect are not required by `mqtt_to_postgres.py` and should not be started unless deliberately testing the older architecture.
