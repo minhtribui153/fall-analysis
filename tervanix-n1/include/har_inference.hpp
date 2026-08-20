@@ -17,7 +17,7 @@ namespace tervanix::har
         char model_sha256[65]{};
     };
 
-#if defined(TERVANIX_BOARD_NESSO_N1)
+#if defined(TERVANIX_BOARD_NESSO_N1) || defined(TERVANIX_BOARD_ESP32_DEV)
     esp_err_t initialize(const model::Image &image);
     bool add_sample(
         const sensor::ImuSample &sample,
