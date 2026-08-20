@@ -62,9 +62,13 @@ namespace tervanix::sensor
         }
 
         const bmi270_config_t measurement_config = {
+            // Output Data Rate = 100 Hz
             .acce_odr = BMI270_ACC_ODR_100_HZ,
+            // Range = 2g (g = gravitational field strength)
             .acce_range = BMI270_ACC_RANGE_2_G,
+            // Output Data Rate = 100 Hz
             .gyro_odr = BMI270_GYR_ODR_100_HZ,
+            // Range = 2000 dps (degrees per second)
             .gyro_range = BMI270_GYR_RANGE_2000_DPS,
         };
 
