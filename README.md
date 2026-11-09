@@ -1,6 +1,8 @@
 # fall-analysis
 An NYP Data Engineering Project that checks for fall detection.
 
+[View docs](docs/README.md)
+
 > To ensure project runs smoothly, please ensure that you have
 > the following tools and programming languages installed on
 > your system:
